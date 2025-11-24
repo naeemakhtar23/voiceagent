@@ -1,0 +1,18 @@
+ngrok Installation Status: ✅ INSTALLED
+
+Location: Found in PATH
+Full Path: C:\Users\ch_na\AppData\Local\Microsoft\...
+
+Status: Ready to use!
+
+To start ngrok:
+  ngrok http 5000
+
+After starting, you'll see:
+  Forwarding  https://xxxxx.ngrok.io -> http://localhost:5000
+
+Then:
+1. Copy the HTTPS URL
+2. Update .env: WEBHOOK_BASE_URL=https://xxxxx.ngrok.io
+3. Configure Twilio webhook with the same URL
+
