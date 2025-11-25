@@ -86,38 +86,33 @@ print("=" * 80)
 print("Step 2: Testing outbound call endpoints...")
 print("=" * 80)
 
-# Test endpoints
+# Test endpoints - Updated with the correct native Twilio outbound endpoint
 endpoints_to_test = [
+    {
+        'url': 'https://api.elevenlabs.io/v1/convai/twilio/outbound-call',
+        'payloads': [
+            {
+                'agent_id': AGENT_ID,
+                'agent_phone_number_id': phone_number_id,
+                'to_number': TEST_PHONE,
+                'conversation_initiation_client_data': {
+                    'test': True,
+                    'questions': ['Test question 1', 'Test question 2']
+                }
+            }
+        ]
+    },
+    # Keep old endpoints for comparison (will likely fail)
     {
         'url': f'https://api.elevenlabs.io/v1/convai/phone-numbers/{phone_number_id}/calls',
         'payloads': [
             {'phone_number': TEST_PHONE, 'agent_id': AGENT_ID},
-            {'to': TEST_PHONE, 'agent_id': AGENT_ID, 'phone_number_id': phone_number_id},
-            {'destination_phone_number': TEST_PHONE, 'phone_number_id': phone_number_id, 'agent_id': AGENT_ID},
-            {'agentId': AGENT_ID, 'participant': {'number': TEST_PHONE}},
         ]
     },
     {
         'url': f'https://api.elevenlabs.io/v1/convai/calls',
         'payloads': [
             {'to': TEST_PHONE, 'agent_id': AGENT_ID, 'phone_number_id': phone_number_id},
-            {'phone_number': TEST_PHONE, 'agent_id': AGENT_ID},
-            {'agentId': AGENT_ID, 'participant': {'number': TEST_PHONE}},
-        ]
-    },
-    {
-        'url': f'https://api.elevenlabs.io/v1/convai/phone-numbers/calls',
-        'payloads': [
-            {'to': TEST_PHONE, 'phone_number_id': phone_number_id, 'agent_id': AGENT_ID},
-            {'phone_number': TEST_PHONE, 'agent_id': AGENT_ID},
-        ]
-    },
-    {
-        'url': f'https://api.elevenlabs.io/v1/convai/agents/{AGENT_ID}/calls',
-        'payloads': [
-            {'to': TEST_PHONE, 'phone_number_id': phone_number_id},
-            {'phone_number': TEST_PHONE},
-            {'participant': {'number': TEST_PHONE}},
         ]
     },
 ]

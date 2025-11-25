@@ -144,77 +144,91 @@ After each answer, acknowledge it and move to the next question. When all questi
             # Store phone number ID in cache
             self.questions_cache[f'{call_id_str}_phone_id'] = phone_number_id
             
-            # IMPORTANT: ElevenLabs does NOT support outbound calls via REST API
-            # Based on diagnostic testing, all REST endpoints return 404/405
-            # The correct approach is to use Twilio to make the outbound call,
-            # then bridge it to ElevenLabs via WebSocket
-            
-            if not self.twilio_client:
-                raise Exception(
-                    "Twilio is required for outbound calls with ElevenLabs. "
-                    "ElevenLabs phone numbers are for receiving calls only. "
-                    "To make outbound calls, we use Twilio to initiate the call "
-                    "and then connect it to ElevenLabs via WebSocket. "
-                    "Please configure TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in your .env file."
-                )
-            
-            # Get ElevenLabs WebSocket URL for the agent
+            # IMPORTANT: Use ElevenLabs' native Twilio outbound call endpoint
+            # This is the correct endpoint for making outbound calls via Twilio integration
+            # Endpoint: /v1/convai/twilio/outbound-call
             try:
-                # Get signed WebSocket URL from ElevenLabs (required for authentication)
-                ws_url_response = requests.get(
-                    'https://api.elevenlabs.io/v1/convai/conversation/get-signed-url',
-                    headers={'xi-api-key': self.api_key},
-                    params={'agent_id': self.agent_id},
-                    timeout=10
-                )
+                logger.info(f"Initiating ElevenLabs outbound call via Twilio integration")
+                logger.info(f"Agent ID: {self.agent_id}, Phone Number ID: {phone_number_id}, To: {to_number}")
                 
-                if ws_url_response.status_code == 200:
-                    signed_url_data = ws_url_response.json()
-                    websocket_url = signed_url_data.get('signed_url')
-                    if not websocket_url:
-                        websocket_url = f'wss://api.elevenlabs.io/v1/convai/conversation?agent_id={self.agent_id}'
-                    logger.info(f"Got signed WebSocket URL for agent {self.agent_id}")
-                elif ws_url_response.status_code == 401:
-                    error_detail = ws_url_response.json() if ws_url_response.text else {}
-                    error_msg = error_detail.get('detail', {}).get('message', 'Authentication failed')
-                    logger.warning(f"Could not get signed URL due to missing permissions: {error_msg}")
-                    logger.info("Attempting to use direct WebSocket URL (for public agents)")
-                    websocket_url = f'wss://api.elevenlabs.io/v1/convai/conversation?agent_id={self.agent_id}'
-                    logger.warning("Using direct WebSocket URL - this may fail if agent is private")
+                # Prepare client data with questions for the agent
+                # This data will be available to the agent during the conversation
+                client_data = {
+                    'call_id': call_id_str,
+                    'questions': questions,
+                    'questions_text': questions_text,
+                    'conversation_context': conversation_context
+                }
+                
+                # Use the correct ElevenLabs Twilio outbound endpoint
+                outbound_url = 'https://api.elevenlabs.io/v1/convai/twilio/outbound-call'
+                
+                payload = {
+                    'agent_id': self.agent_id,
+                    'agent_phone_number_id': phone_number_id,  # This is the imported Twilio number ID in ElevenLabs
+                    'to_number': to_number,
+                    'conversation_initiation_client_data': client_data  # Pass questions to agent
+                }
+                
+                headers = {
+                    'xi-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                }
+                
+                logger.info(f"Calling ElevenLabs outbound endpoint: {outbound_url}")
+                logger.info(f"Payload: {json.dumps(payload, indent=2)}")
+                
+                response = requests.post(outbound_url, headers=headers, json=payload, timeout=15)
+                
+                logger.info(f"Response status: {response.status_code}")
+                logger.info(f"Response headers: {dict(response.headers)}")
+                response_text = response.text[:1000] if response.text else "No response body"
+                logger.info(f"Response body: {response_text}")
+                
+                if response.status_code in [200, 201, 202]:
+                    try:
+                        result = response.json()
+                        conversation_id = result.get('conversation_id')
+                        call_sid = result.get('call_sid')
+                        
+                        logger.info(f"✅ ElevenLabs outbound call initiated successfully!")
+                        logger.info(f"Conversation ID: {conversation_id}, Call SID: {call_sid}")
+                        
+                        # Store conversation ID and call SID for webhook tracking
+                        self.questions_cache[f'{call_id_str}_conversation_id'] = conversation_id
+                        self.questions_cache[f'{call_id_str}_call_sid'] = call_sid
+                        self.questions_cache[f'{call_id_str}_context'] = conversation_context
+                        
+                        # Return call identifier (prefer call_sid, then conversation_id, then our call_id)
+                        return call_sid or conversation_id or call_id_str
+                    except json.JSONDecodeError:
+                        # Response might not be JSON, but status is success
+                        logger.info(f"Call initiated (non-JSON response), status: {response.status_code}")
+                        return call_id_str
+                elif response.status_code == 401:
+                    error_detail = response_text
+                    raise Exception(f"Authentication failed (401): {error_detail}. Check your API key and permissions.")
+                elif response.status_code == 403:
+                    error_detail = response_text
+                    raise Exception(f"Permission denied (403): {error_detail}. Check your API key has 'convai_write' permission.")
+                elif response.status_code == 404:
+                    error_detail = response_text
+                    raise Exception(f"Endpoint not found (404): {error_detail}. Verify the endpoint URL is correct.")
+                elif response.status_code == 422:
+                    error_detail = response_text
+                    raise Exception(f"Validation error (422): {error_detail}. Check that agent_id and agent_phone_number_id are correct.")
                 else:
-                    websocket_url = f'wss://api.elevenlabs.io/v1/convai/conversation?agent_id={self.agent_id}'
-                    logger.warning(f"Could not get signed URL (Status: {ws_url_response.status_code}), using direct URL")
+                    error_detail = response_text
+                    error_msg = f"ElevenLabs API returned {response.status_code}: {error_detail}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Network error calling ElevenLabs outbound endpoint: {str(e)}")
+                raise Exception(f"Failed to connect to ElevenLabs API: {str(e)}")
             except Exception as e:
-                logger.warning(f"Error getting WebSocket URL: {str(e)}, using direct URL")
-                websocket_url = f'wss://api.elevenlabs.io/v1/convai/conversation?agent_id={self.agent_id}'
-            
-            # Store context and WebSocket URL in cache for the webhook to use
-            self.questions_cache[f'{call_id_str}_context'] = conversation_context
-            self.questions_cache[f'{call_id_str}_ws_url'] = websocket_url
-            
-            # Use Twilio to initiate the outbound call
-            # The webhook will connect the Twilio call to ElevenLabs WebSocket
-            try:
-                logger.info(f"Initiating Twilio call to {to_number}, will bridge to ElevenLabs agent {self.agent_id}")
-                
-                call = self.twilio_client.calls.create(
-                    to=to_number,
-                    from_=self.twilio_phone,
-                    url=f'{self.webhook_url}/api/elevenlabs-voice-flow?call_id={call_id}&agent_id={self.agent_id}',
-                    method='POST',
-                    status_callback=f'{self.webhook_url}/api/call-status',
-                    status_callback_method='POST'
-                )
-                
-                logger.info(f"Twilio call initiated: SID={call.sid}, To={to_number}, From={self.twilio_phone}")
-                logger.info(f"Webhook URL: {self.webhook_url}/api/elevenlabs-voice-flow")
-                logger.info(f"ElevenLabs WebSocket: {websocket_url[:50]}...")
-                
-                return call.sid
-                
-            except Exception as twilio_error:
-                logger.error(f"Error initiating Twilio call: {str(twilio_error)}")
-                raise Exception(f"Failed to initiate call via Twilio: {str(twilio_error)}")
+                logger.error(f"Error initiating ElevenLabs outbound call: {str(e)}")
+                raise
             
         except Exception as e:
             logger.error(f"Error initiating ElevenLabs call: {str(e)}")
