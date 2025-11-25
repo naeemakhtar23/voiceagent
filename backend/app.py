@@ -10,6 +10,7 @@ from database import Database
 from config import FLASK_PORT, FLASK_DEBUG
 from demo_mode import DemoMode
 import logging
+import json
 import os
 
 logging.basicConfig(level=logging.INFO)
@@ -411,6 +412,10 @@ def elevenlabs_webhook():
         else:
             webhook_data = request.form.to_dict()
         
+        # Log raw webhook data for debugging
+        logger.info(f"ElevenLabs webhook received - Method: {request.method}, Content-Type: {request.content_type}")
+        logger.info(f"Raw webhook data: {json.dumps(webhook_data, indent=2, default=str)}")
+        
         # Verify webhook signature if secret is configured
         if elevenlabs_handler.webhook_secret:
             # Add signature verification logic here based on ElevenLabs docs
@@ -422,7 +427,7 @@ def elevenlabs_webhook():
         
         return jsonify(result)
     except Exception as e:
-        logger.error(f"Error processing ElevenLabs webhook: {str(e)}")
+        logger.error(f"Error processing ElevenLabs webhook: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
             'message': str(e)

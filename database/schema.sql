@@ -6,6 +6,10 @@ USE ePRF;
 GO
 
 -- Check if tables exist and drop them if they do
+IF OBJECT_ID('webhook_logs', 'U') IS NOT NULL
+    DROP TABLE webhook_logs;
+GO
+
 IF OBJECT_ID('call_results', 'U') IS NOT NULL
     DROP TABLE call_results;
 GO
@@ -55,6 +59,20 @@ CREATE TABLE call_results (
 );
 GO
 
+-- Webhook logs table - stores complete webhook responses from ElevenLabs
+CREATE TABLE webhook_logs (
+    id INT PRIMARY KEY IDENTITY(1,1),
+    event_type VARCHAR(100),
+    conversation_id VARCHAR(200),
+    call_id VARCHAR(200),
+    call_sid VARCHAR(200),
+    webhook_data NVARCHAR(MAX), -- Complete JSON response
+    processed_successfully BIT DEFAULT 0,
+    error_message NVARCHAR(MAX),
+    created_at DATETIME DEFAULT GETDATE()
+);
+GO
+
 -- Create indexes for better performance
 CREATE INDEX IX_calls_phone_number ON calls(phone_number);
 CREATE INDEX IX_calls_call_sid ON calls(call_sid);
@@ -67,6 +85,13 @@ CREATE INDEX IX_questions_question_number ON questions(call_id, question_number)
 GO
 
 CREATE INDEX IX_call_results_call_id ON call_results(call_id);
+GO
+
+CREATE INDEX IX_webhook_logs_event_type ON webhook_logs(event_type);
+CREATE INDEX IX_webhook_logs_conversation_id ON webhook_logs(conversation_id);
+CREATE INDEX IX_webhook_logs_call_id ON webhook_logs(call_id);
+CREATE INDEX IX_webhook_logs_call_sid ON webhook_logs(call_sid);
+CREATE INDEX IX_webhook_logs_created_at ON webhook_logs(created_at);
 GO
 
 -- Insert sample data (optional - for testing)
@@ -82,7 +107,7 @@ GO
 */
 
 PRINT 'Database schema created successfully!';
-PRINT 'Tables created: calls, questions, call_results';
+PRINT 'Tables created: calls, questions, call_results, webhook_logs';
 PRINT 'Indexes created for optimal performance';
 GO
 

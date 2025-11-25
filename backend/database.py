@@ -203,6 +203,26 @@ class Database:
             logger.error(f"Error getting call data: {str(e)}")
             raise
     
+    def get_call_id_by_sid(self, call_sid):
+        """Get call_id (database ID) by call_sid"""
+        query = """
+        SELECT id
+        FROM calls
+        WHERE call_sid = ?
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (call_sid,))
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return row[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error getting call_id by call_sid: {str(e)}")
+            return None
+    
     # Question Management Methods
     def save_question(self, call_id, question_text, question_number):
         """Save question to database"""
@@ -304,6 +324,95 @@ class Database:
         ORDER BY created_at DESC
         """
         return self.fetch_all(query)
+    
+    # Webhook Logs Management
+    def save_webhook_log(self, event_type, conversation_id, call_id, call_sid, webhook_data, processed_successfully=True, error_message=None):
+        """Save complete webhook response to logs table"""
+        query = """
+        INSERT INTO webhook_logs (event_type, conversation_id, call_id, call_sid, 
+                                  webhook_data, processed_successfully, error_message, created_at)
+        OUTPUT INSERTED.id
+        VALUES (?, ?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        try:
+            # Convert webhook_data to JSON string if it's a dict
+            if isinstance(webhook_data, dict):
+                webhook_json = json.dumps(webhook_data, default=str, ensure_ascii=False)
+            elif isinstance(webhook_data, str):
+                webhook_json = webhook_data
+            else:
+                webhook_json = str(webhook_data)
+            
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (
+                event_type,
+                conversation_id,
+                call_id,
+                call_sid,
+                webhook_json,
+                1 if processed_successfully else 0,
+                error_message
+            ))
+            row = cursor.fetchone()
+            log_id = row[0] if row else None
+            conn.commit()
+            cursor.close()
+            logger.info(f"✅ Webhook log saved: event_type={event_type}, conversation_id={conversation_id}, log_id={log_id}")
+            return log_id
+        except Exception as e:
+            logger.error(f"Error saving webhook log: {str(e)}")
+            # Don't raise - we don't want webhook logging to break the webhook handler
+            return None
+    
+    def get_webhook_logs(self, conversation_id=None, call_id=None, event_type=None, limit=100):
+        """Get webhook logs with optional filters"""
+        query = """
+        SELECT id, event_type, conversation_id, call_id, call_sid, 
+               processed_successfully, error_message, created_at
+        FROM webhook_logs
+        WHERE 1=1
+        """
+        params = []
+        
+        if conversation_id:
+            query += " AND conversation_id = ?"
+            params.append(conversation_id)
+        
+        if call_id:
+            query += " AND call_id = ?"
+            params.append(call_id)
+        
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(event_type)
+        
+        query += " ORDER BY created_at DESC"
+        
+        if limit:
+            query += f" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
+        
+        return self.fetch_all(query, tuple(params) if params else None)
+    
+    def get_webhook_log_data(self, log_id):
+        """Get full webhook data for a specific log entry"""
+        query = """
+        SELECT webhook_data
+        FROM webhook_logs
+        WHERE id = ?
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (log_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return row[0]
+            return None
+        except Exception as e:
+            logger.error(f"Error getting webhook log data: {str(e)}")
+            return None
     
     def close(self):
         """Close database connection"""

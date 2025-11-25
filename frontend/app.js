@@ -104,6 +104,7 @@ function addQuestion() {
     questionDiv.innerHTML = `
         <span class="question-number">Q${questionCounter}</span>
         <input type="text" 
+               value="Will the service be provided in the client’s home."
                placeholder="Enter your question (e.g., Do you have health insurance?)" 
                class="question-input"
                required>
@@ -115,7 +116,30 @@ function addQuestion() {
         </button>
     `;
     
+    
     questionsList.appendChild(questionDiv);
+
+    const questionDiv2 = document.createElement('div');
+    questionDiv2.className = 'question-item';
+    questionDiv2.id = `question-${questionCounter+1}`;
+    
+    questionDiv2.innerHTML = `
+        <span class="question-number">Q${questionCounter+1}</span>
+        <input type="text" 
+               value="Does the client use augmentative or assistive communication aids."
+               placeholder="Enter your question (e.g., Do you have health insurance?)" 
+               class="question-input"
+               required>
+        <button type="button" class="btn-remove" data-question-id="${questionCounter+1}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+        </button>
+    `;
+    
+    
+    questionsList.appendChild(questionDiv2);
     
     // Add remove button event listener
     const removeBtn = questionDiv.querySelector('.btn-remove');
