@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Twilio Configuration
-TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', 'ACe301f2e318b9bc5b2fed0ee1a2b3af64')
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '6cbd526dbb26f093a8208c03da606012')
-TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '+19043318746')
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER', '')
 
 # Database Configuration - SQL Server
 DB_CONNECTION_STRING = os.getenv(
@@ -22,7 +22,7 @@ DB_CONNECTION_STRING = os.getenv(
 # Webhook URL (set after Cloudflare Tunnel setup)
 # Use Cloudflare Tunnel: cloudflared tunnel --url http://localhost:5000
 # Copy the https://random-string.trycloudflare.com URL and set it here
-WEBHOOK_BASE_URL = os.getenv('WEBHOOK_BASE_URL', 'http://localhost:5000')
+WEBHOOK_BASE_URL = os.getenv('WEBHOOK_BASE_URL', ' https://concerns-organ-quilt-tile.trycloudflare.com')
 
 # Flask Configuration
 FLASK_ENV = os.getenv('FLASK_ENV', 'development')
@@ -33,6 +33,8 @@ FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
 ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY', '')
 ELEVENLABS_AGENT_ID = os.getenv('ELEVENLABS_AGENT_ID', '')
 ELEVENLABS_WEBHOOK_SECRET = os.getenv('ELEVENLABS_WEBHOOK_SECRET', '')
+# Custom endpoint override (leave empty to use default attempts)
+ELEVENLABS_CALL_ENDPOINT = os.getenv('ELEVENLABS_CALL_ENDPOINT', '')
 
 # Application Settings
 APP_NAME = "Voice Call System"
