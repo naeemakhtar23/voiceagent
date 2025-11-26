@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 from voice_handler import VoiceHandler
 from elevenlabs_handler import ElevenLabsHandler
+from ocr_handler import OCRHandler
 from database import Database
 from config import FLASK_PORT, FLASK_DEBUG
 from demo_mode import DemoMode
@@ -26,6 +27,7 @@ CORS(app)
 db = Database()
 voice_handler = VoiceHandler()
 elevenlabs_handler = ElevenLabsHandler()
+ocr_handler = OCRHandler()
 demo_mode = DemoMode()
 
 # Check if demo mode is enabled
@@ -38,6 +40,12 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/ocr')
+def ocr_page():
+    """Serve the OCR page"""
+    return render_template('ocr.html')
+
+
 @app.route('/style.css')
 def style_css():
     """Serve CSS file"""
@@ -48,6 +56,12 @@ def style_css():
 def app_js():
     """Serve JavaScript file"""
     return send_from_directory('../frontend', 'app.js', mimetype='application/javascript')
+
+
+@app.route('/ocr.js')
+def ocr_js():
+    """Serve OCR JavaScript file"""
+    return send_from_directory('../frontend', 'ocr.js', mimetype='application/javascript')
 
 
 @app.route('/api/initiate-call', methods=['POST'])
@@ -819,6 +833,213 @@ def health_check():
         return jsonify({
             'status': 'unhealthy',
             'error': str(e)
+        }), 500
+
+
+@app.route('/api/ocr/poppler-status', methods=['GET'])
+def poppler_status():
+    """Check poppler installation status"""
+    try:
+        import shutil
+        import os
+        import platform
+        
+        status = {
+            'poppler_path': ocr_handler.poppler_path,
+            'poppler_path_env': os.environ.get('POPPLER_PATH'),
+            'pdftoppm_in_path': shutil.which('pdftoppm'),
+            'system': platform.system(),
+        }
+        
+        # Check common paths
+        if platform.system() == 'Windows':
+            common_paths = [
+                r'C:\poppler\library\bin',
+                r'C:\poppler\Library\bin',
+                r'C:\poppler\bin',
+                r'C:\Program Files\poppler\bin',
+            ]
+            status['checked_paths'] = {}
+            for path in common_paths:
+                normalized = os.path.normpath(path)
+                exists = os.path.exists(normalized)
+                pdftoppm_file = os.path.join(normalized, 'pdftoppm.exe')
+                has_pdftoppm = os.path.exists(pdftoppm_file)
+                status['checked_paths'][path] = {
+                    'exists': exists,
+                    'has_pdftoppm': has_pdftoppm,
+                    'normalized': normalized
+                }
+        
+        # Check if poppler_path has pdftoppm and DLLs
+        if ocr_handler.poppler_path:
+            pdftoppm_check = os.path.join(ocr_handler.poppler_path, 'pdftoppm.exe')
+            status['poppler_path_valid'] = os.path.exists(pdftoppm_check)
+            status['pdftoppm_path'] = pdftoppm_check if os.path.exists(pdftoppm_check) else None
+            
+            # Check for DLLs (critical for Windows)
+            if platform.system() == 'Windows' and os.path.exists(ocr_handler.poppler_path):
+                try:
+                    files_in_dir = os.listdir(ocr_handler.poppler_path)
+                    dll_files = [f for f in files_in_dir if f.lower().endswith('.dll')]
+                    exe_files = [f for f in files_in_dir if f.lower().endswith('.exe')]
+                    
+                    status['files_in_bin'] = {
+                        'dll_count': len(dll_files),
+                        'exe_count': len(exe_files),
+                        'dll_files': dll_files[:10],  # First 10 DLLs
+                        'exe_files': exe_files[:10],  # First 10 EXEs
+                    }
+                    
+                    # Check for critical DLLs
+                    critical_dlls = ['poppler.dll', 'poppler-cpp.dll', 'libpoppler.dll']
+                    status['critical_dlls'] = {}
+                    for dll in critical_dlls:
+                        dll_path = os.path.join(ocr_handler.poppler_path, dll)
+                        status['critical_dlls'][dll] = os.path.exists(dll_path)
+                    
+                    # Check if any DLLs exist
+                    status['has_any_dlls'] = len(dll_files) > 0
+                    if not status['has_any_dlls']:
+                        status['dll_warning'] = "No DLL files found! Poppler executables require DLLs to run. You may need to re-download poppler or install Visual C++ Redistributables."
+                    
+                except Exception as e:
+                    status['files_in_bin'] = {'error': str(e)}
+        
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Error checking poppler status: {str(e)}")
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+
+# OCR Endpoints
+@app.route('/api/ocr/upload', methods=['POST'])
+def ocr_upload():
+    """Upload and process OCR document"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({
+                'success': False,
+                'error': 'No file provided'
+            }), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({
+                'success': False,
+                'error': 'No file selected'
+            }), 400
+        
+        if not ocr_handler.allowed_file(file.filename):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid file type. Supported: PDF, PNG, JPG, JPEG'
+            }), 400
+        
+        # Get file info
+        file_name = file.filename
+        file_ext = file_name.rsplit('.', 1)[1].lower() if '.' in file_name else ''
+        file_size = len(file.read())
+        file.seek(0)  # Reset file pointer
+        
+        # Create document record in database
+        try:
+            document_id = db.create_ocr_document(file_name, file_ext, file_size)
+            logger.info(f"OCR document record created: ID={document_id}")
+        except Exception as db_error:
+            logger.error(f"Database error creating OCR document: {str(db_error)}")
+            return jsonify({
+                'success': False,
+                'error': f'Database error: {str(db_error)}'
+            }), 500
+        
+        # Update status to processing
+        try:
+            db.update_ocr_document(document_id, status='processing')
+        except Exception as e:
+            logger.warning(f"Could not update document status: {str(e)}")
+        
+        # Process document in background (for now, synchronous)
+        try:
+            result = ocr_handler.process_uploaded_document(file, file_name)
+            
+            # Update document with extracted data
+            db.update_ocr_document(
+                document_id=document_id,
+                document_text=result['document_text'],
+                extracted_data=result['extracted_data'],
+                parameters_list=result['parameters_list'],
+                refined_text=result['refined_text'],
+                status='completed'
+            )
+            
+            logger.info(f"OCR document processed successfully: ID={document_id}")
+            
+            return jsonify({
+                'success': True,
+                'document_id': document_id,
+                'message': 'Document processed successfully'
+            })
+        except Exception as process_error:
+            logger.error(f"Error processing OCR document: {str(process_error)}")
+            # Update status to error
+            try:
+                db.update_ocr_document(document_id, status='error')
+            except:
+                pass
+            
+            return jsonify({
+                'success': False,
+                'error': f'Error processing document: {str(process_error)}'
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Error in OCR upload: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/ocr/documents', methods=['GET'])
+def get_ocr_documents():
+    """Get all OCR documents"""
+    try:
+        documents = db.get_all_ocr_documents()
+        # Convert datetime objects to strings
+        for doc in documents:
+            for key, value in doc.items():
+                if hasattr(value, 'isoformat'):
+                    doc[key] = value.isoformat()
+        logger.info(f"Successfully retrieved {len(documents)} OCR documents from database")
+        return jsonify(documents)
+    except Exception as e:
+        logger.error(f"Error getting OCR documents from database: {str(e)}", exc_info=True)
+        return jsonify([])
+
+
+@app.route('/api/ocr/document/<int:document_id>', methods=['GET'])
+def get_ocr_document(document_id):
+    """Get specific OCR document details"""
+    try:
+        document_data = db.get_ocr_document(document_id)
+        if document_data:
+            # Convert datetime objects
+            for key, value in document_data.items():
+                if hasattr(value, 'isoformat'):
+                    document_data[key] = value.isoformat()
+            return jsonify(document_data)
+        else:
+            return jsonify({
+                'error': 'Document not found'
+            }), 404
+    except Exception as e:
+        logger.error(f"Error getting OCR document: {str(e)}", exc_info=True)
+        return jsonify({
+            'error': f'Error retrieving document: {str(e)}'
         }), 500
 
 

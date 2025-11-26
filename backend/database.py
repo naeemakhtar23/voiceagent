@@ -414,6 +414,108 @@ class Database:
             logger.error(f"Error getting webhook log data: {str(e)}")
             return None
     
+    # OCR Document Management Methods
+    def create_ocr_document(self, file_name, file_type, file_size, document_text=None):
+        """Create a new OCR document record"""
+        query = """
+        INSERT INTO ocr_documents (file_name, file_type, file_size, document_text, status, created_at, updated_at)
+        OUTPUT INSERTED.id
+        VALUES (?, ?, ?, ?, 'uploaded', GETDATE(), GETDATE())
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (file_name, file_type, file_size, document_text))
+            document_id = cursor.fetchone()[0]
+            conn.commit()
+            cursor.close()
+            logger.info(f"OCR document created: ID={document_id}, File={file_name}")
+            return document_id
+        except Exception as e:
+            logger.error(f"Error creating OCR document: {str(e)}")
+            raise
+    
+    def update_ocr_document(self, document_id, document_text=None, extracted_data=None, parameters_list=None, refined_text=None, status=None):
+        """Update OCR document with extracted data"""
+        updates = []
+        params = []
+        
+        if document_text is not None:
+            updates.append("document_text = ?")
+            params.append(document_text)
+        
+        if extracted_data is not None:
+            updates.append("ExtractedData = ?")
+            params.append(json.dumps(extracted_data) if isinstance(extracted_data, (dict, list)) else extracted_data)
+        
+        if parameters_list is not None:
+            updates.append("ParametersList = ?")
+            params.append(json.dumps(parameters_list) if isinstance(parameters_list, (dict, list)) else parameters_list)
+        
+        if refined_text is not None:
+            updates.append("RefinedDocumentText = ?")
+            params.append(refined_text)
+        
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        
+        if not updates:
+            return
+        
+        updates.append("updated_at = GETDATE()")
+        params.append(document_id)
+        
+        query = f"""
+        UPDATE ocr_documents 
+        SET {', '.join(updates)}
+        WHERE id = ?
+        """
+        try:
+            self.execute(query, tuple(params))
+            logger.info(f"OCR document updated: ID={document_id}")
+        except Exception as e:
+            logger.error(f"Error updating OCR document: {str(e)}")
+            raise
+    
+    def get_ocr_document(self, document_id):
+        """Get OCR document by ID"""
+        query = """
+        SELECT id, document_text, ExtractedData, ParametersList, RefinedDocumentText,
+               file_name, file_type, file_size, status, created_at, updated_at
+        FROM ocr_documents
+        WHERE id = ?
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (document_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                if cursor.description:
+                    columns = [column[0] for column in cursor.description]
+                    cursor.close()
+                    return dict(zip(columns, row))
+                else:
+                    cursor.close()
+                    logger.warning(f"No column description available for document_id {document_id}")
+                    return None
+            cursor.close()
+            return None
+        except Exception as e:
+            logger.error(f"Error getting OCR document: {str(e)}")
+            raise
+    
+    def get_all_ocr_documents(self):
+        """Get all OCR documents for dashboard"""
+        query = """
+        SELECT id, file_name, file_type, file_size, status, created_at, updated_at
+        FROM ocr_documents
+        ORDER BY created_at DESC
+        """
+        return self.fetch_all(query)
+    
     def close(self):
         """Close database connection"""
         if self.conn:
