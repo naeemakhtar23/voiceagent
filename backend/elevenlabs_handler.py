@@ -11,6 +11,7 @@ from twilio.rest import Client as TwilioClient
 import json
 import logging
 import requests
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -645,9 +646,10 @@ After each answer, acknowledge it and move to the next question. When all questi
                                     logger.info(f"Saving transcription for call_id={db_call_id} from {len(messages)} messages")
                                     
                                     # Parse messages to extract questions and answers
-                                    # Messages alternate: agent (question) -> user (answer)
+                                    # Filter out confirmation questions and greetings to get only actual survey questions
                                     question_num = 0
                                     current_question = None
+                                    questions_and_answers = []
                                     
                                     for msg in messages:
                                         # Handle different message formats
@@ -660,61 +662,132 @@ After each answer, acknowledge it and move to the next question. When all questi
                                         else:
                                             continue
                                         
+                                        # Extract questions and answers
+                                        # Filter out confirmation questions and greetings to get only actual survey questions
                                         if role == 'agent' and message_text:
-                                            # Check if this is a question (contains question mark or "yes or no")
-                                            if '?' in message_text or 'yes or no' in message_text.lower():
-                                                current_question = message_text
-                                                logger.info(f"Found question {question_num + 1}: {current_question[:100]}...")
+                                            message_lower = message_text.lower().strip()
+                                            # Skip confirmation questions and greetings
+                                            is_confirmation = any(phrase in message_lower for phrase in [
+                                                'is that correct', 'you said', 'did i hear', 'confirm'
+                                            ])
+                                            is_greeting = any(phrase in message_lower for phrase in [
+                                                'how can i help', 'calling for', 'may i proceed', 'can i help'
+                                            ])
+                                            
+                                            # Check if this is an actual survey question (contains question mark or "yes or no")
+                                            if ('?' in message_text or 'yes or no' in message_lower) and not is_confirmation and not is_greeting:
+                                                # Clean question text by removing instruction phrases
+                                                cleaned_question = self._clean_question(message_text)
+                                                current_question = cleaned_question
+                                                question_num += 1
+                                                logger.info(f"📝 Found actual survey question {question_num}: {current_question}")
                                         elif role == 'user' and message_text and current_question:
                                             # This is an answer to the current question
                                             answer = self._extract_answer(message_text)
                                             if answer:
-                                                try:
-                                                    self.db.save_answer(
+                                                questions_and_answers.append({
+                                                    'question_number': question_num,
+                                                    'question': current_question,
+                                                    'answer': answer,
+                                                    'raw_answer': message_text
+                                                })
+                                                logger.info(f"✅ Extracted answer {question_num}: {answer} (raw: {message_text})")
+                                                current_question = None
+                                    
+                                    # Save questions and answers to database
+                                    if questions_and_answers:
+                                        logger.info(f"Saving {len(questions_and_answers)} Q&A pairs to database for call_id={db_call_id}")
+                                        for qa in questions_and_answers:
+                                            try:
+                                                # Check if question already exists
+                                                existing_questions = self.db.get_call_questions(db_call_id)
+                                                existing_question = next(
+                                                    (q for q in existing_questions 
+                                                     if q.get('question_number') == qa['question_number']),
+                                                    None
+                                                )
+                                                
+                                                if not existing_question:
+                                                    # Insert new question
+                                                    self.db.save_question(
                                                         call_id=db_call_id,
-                                                        question_num=question_num,
-                                                        answer=answer,
-                                                        confidence=0.9,
-                                                        raw_response=message_text
+                                                        question_text=qa['question'],
+                                                        question_number=qa['question_number']
                                                     )
-                                                    logger.info(f"✅ Saved answer {question_num + 1}: {answer} for call_id={db_call_id}")
-                                                    question_num += 1
-                                                    current_question = None
-                                                except Exception as save_error:
-                                                    logger.error(f"Could not save answer {question_num}: {str(save_error)}", exc_info=True)
+                                                    logger.info(f"✅ Saved new question {qa['question_number']}: {qa['question']}")
+                                                else:
+                                                    # Update question text if it's different (e.g., cleaned version)
+                                                    if existing_question.get('question_text') != qa['question']:
+                                                        update_question_query = """
+                                                        UPDATE questions 
+                                                        SET question_text = ?
+                                                        WHERE call_id = ? AND question_number = ?
+                                                        """
+                                                        self.db.execute(update_question_query, (
+                                                            qa['question'],
+                                                            db_call_id,
+                                                            qa['question_number']
+                                                        ))
+                                                        logger.info(f"✅ Updated question text {qa['question_number']}: {qa['question']}")
+                                                
+                                                # Update answer (this will update existing question)
+                                                self.db.save_answer(
+                                                    call_id=db_call_id,
+                                                    question_num=qa['question_number'],
+                                                    answer=qa['answer'],
+                                                    confidence=0.9,
+                                                    raw_response=qa['raw_answer']
+                                                )
+                                                logger.info(f"✅ Saved answer {qa['question_number']}: {qa['answer']}")
+                                            except Exception as save_error:
+                                                logger.error(f"Could not save Q&A {qa['question_number']}: {str(save_error)}", exc_info=True)
+                                    
+                                    # Update calls table with completed status, ended_at, and duration
+                                    try:
+                                        # Use SQL Server's GETDATE() and DATEDIFF for consistency
+                                        update_query = """
+                                        UPDATE calls 
+                                        SET status = 'completed', 
+                                            ended_at = GETDATE(),
+                                            duration_seconds = CASE 
+                                                WHEN started_at IS NOT NULL 
+                                                THEN DATEDIFF(SECOND, started_at, GETDATE())
+                                                ELSE 0
+                                            END
+                                        WHERE id = ?
+                                        """
+                                        self.db.execute(update_query, (db_call_id,))
+                                        logger.info(f"✅ Updated call {db_call_id}: status=completed, ended_at=GETDATE(), duration calculated")
+                                    except Exception as update_error:
+                                        logger.error(f"Could not update call status: {str(update_error)}", exc_info=True)
+                                    
+                                    # Generate and save call_results
+                                    try:
+                                        call_results = self.db.get_call_results_json(db_call_id)
+                                        if call_results:
+                                            logger.info(f"✅ Generated and saved call results for call_id={db_call_id}")
+                                        else:
+                                            logger.warning(f"Could not generate call results for call_id={db_call_id}")
+                                    except Exception as results_error:
+                                        logger.error(f"Could not generate call results: {str(results_error)}", exc_info=True)
                                     
                                     # Also save the full transcript as a complete record
                                     if text:
-                                        try:
-                                            # Save full transcript (you might want to add a method for this)
-                                            # For now, save it as the last answer's raw response
-                                            if question_num > 0:
-                                                # Update the last answer with full transcript
-                                                logger.info(f"Saving full transcript ({len(text)} chars) for call_id={call_id}")
-                                            else:
-                                                # If no answers were parsed, save transcript as first answer
-                                                self.db.save_answer(
-                                                    call_id=db_call_id,
-                                                    question_num=0,
-                                                    answer='unclear',
-                                                    confidence=0.5,
-                                                    raw_response=text
-                                                )
-                                                logger.info(f"Saved full transcript as raw response for call_id={db_call_id}")
-                                        except Exception as save_error:
-                                            logger.warning(f"Could not save full transcript: {str(save_error)}")
+                                        logger.info(f"Full transcript available ({len(text)} chars) for call_id={db_call_id}")
                                 elif text:
                                     # We have text but no messages array - save it anyway
                                     logger.info(f"Saving transcription text ({len(text)} chars) for call_id={db_call_id} (no messages array)")
                                     try:
-                                        self.db.save_answer(
-                                            call_id=db_call_id,
-                                            question_num=0,
-                                            answer='unclear',
-                                            confidence=0.5,
-                                            raw_response=text
-                                        )
-                                        logger.info(f"✅ Saved full transcript text for call_id={db_call_id}")
+                                        # Update call status even if we only have text
+                                        update_query = """
+                                        UPDATE calls 
+                                        SET status = 'completed', 
+                                            ended_at = GETDATE(),
+                                            duration_seconds = DATEDIFF(SECOND, started_at, GETDATE())
+                                        WHERE id = ?
+                                        """
+                                        self.db.execute(update_query, (db_call_id,))
+                                        logger.info(f"✅ Updated call {db_call_id}: status=completed")
                                     except Exception as save_error:
                                         logger.error(f"Could not save transcript text: {str(save_error)}", exc_info=True)
                                 else:
@@ -825,3 +898,40 @@ After each answer, acknowledge it and move to the next question. When all questi
             return 'no'
         else:
             return 'unclear'
+    
+    def _clean_question(self, question_text):
+        """Clean question text by removing instruction phrases like 'Please answer yes or no only'"""
+        if not question_text:
+            return question_text
+        
+        cleaned_question = question_text.strip()
+        # Remove common instruction phrases
+        phrases_to_remove = [
+            'please answer yes or no only',
+            'please answer yes or no',
+            'answer yes or no only',
+            'answer yes or no',
+            'yes or no only',
+            'yes or no'
+        ]
+        
+        for phrase in phrases_to_remove:
+            # Remove phrase at the end (case insensitive)
+            if cleaned_question.lower().endswith(phrase.lower()):
+                cleaned_question = cleaned_question[:-len(phrase)].strip()
+                # Remove trailing punctuation if any
+                if cleaned_question and cleaned_question[-1] in ['.', ',', '?']:
+                    # Keep question mark, remove others
+                    if cleaned_question[-1] != '?':
+                        cleaned_question = cleaned_question[:-1].strip()
+            # Also check if phrase appears before question mark
+            elif phrase.lower() in cleaned_question.lower():
+                # Remove phrase and any surrounding punctuation
+                pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+                cleaned_question = pattern.sub('', cleaned_question).strip()
+                # Clean up multiple spaces and trailing punctuation
+                cleaned_question = re.sub(r'\s+', ' ', cleaned_question).strip()
+                if cleaned_question and cleaned_question[-1] in ['.', ',']:
+                    cleaned_question = cleaned_question[:-1].strip()
+        
+        return cleaned_question
