@@ -10,6 +10,15 @@ from ocr_handler import OCRHandler
 from database import Database
 from config import FLASK_PORT, FLASK_DEBUG
 from demo_mode import DemoMode
+
+# Try to import PaddleOCR handler (optional dependency)
+try:
+    from paddleocr_handler import PaddleOCRHandler
+    PADDLEOCR_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"PaddleOCR handler not available: {str(e)}")
+    PaddleOCRHandler = None
+    PADDLEOCR_AVAILABLE = False
 import logging
 import json
 import os
@@ -28,6 +37,16 @@ db = Database()
 voice_handler = VoiceHandler()
 elevenlabs_handler = ElevenLabsHandler()
 ocr_handler = OCRHandler()
+paddleocr_handler = None
+if PADDLEOCR_AVAILABLE and PaddleOCRHandler:
+    try:
+        paddleocr_handler = PaddleOCRHandler()
+        logger.info("PaddleOCR handler initialized successfully")
+    except Exception as e:
+        logger.warning(f"PaddleOCR handler initialization failed: {str(e)}. PaddleOCR features will be unavailable.")
+        paddleocr_handler = None
+else:
+    logger.info("PaddleOCR not available - install with: pip install paddleocr paddlepaddle")
 demo_mode = DemoMode()
 
 # Check if demo mode is enabled
@@ -998,6 +1017,103 @@ def ocr_upload():
         
     except Exception as e:
         logger.error(f"Error in OCR upload: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/ocr/paddleocr-upload', methods=['POST'])
+def paddleocr_upload():
+    """Upload and process OCR document using PaddleOCR"""
+    try:
+        logger.info("PaddleOCR upload endpoint called")
+        if paddleocr_handler is None:
+            logger.warning("PaddleOCR handler is None - not available")
+            return jsonify({
+                'success': False,
+                'error': 'PaddleOCR is not available. Please install it using: pip install paddleocr paddlepaddle'
+            }), 503
+        
+        if 'file' not in request.files:
+            return jsonify({
+                'success': False,
+                'error': 'No file provided'
+            }), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({
+                'success': False,
+                'error': 'No file selected'
+            }), 400
+        
+        if not paddleocr_handler.allowed_file(file.filename):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid file type. Supported: PDF, PNG, JPG, JPEG'
+            }), 400
+        
+        # Get file info
+        file_name = file.filename
+        file_ext = file_name.rsplit('.', 1)[1].lower() if '.' in file_name else ''
+        file_size = len(file.read())
+        file.seek(0)  # Reset file pointer
+        
+        # Create document record in database
+        try:
+            document_id = db.create_ocr_document(file_name, file_ext, file_size)
+            logger.info(f"PaddleOCR document record created: ID={document_id}")
+        except Exception as db_error:
+            logger.error(f"Database error creating PaddleOCR document: {str(db_error)}")
+            return jsonify({
+                'success': False,
+                'error': f'Database error: {str(db_error)}'
+            }), 500
+        
+        # Update status to processing
+        try:
+            db.update_ocr_document(document_id, status='processing')
+        except Exception as e:
+            logger.warning(f"Could not update document status: {str(e)}")
+        
+        # Process document with PaddleOCR
+        try:
+            result = paddleocr_handler.process_uploaded_document(file, file_name)
+            
+            # Update document with extracted data
+            db.update_ocr_document(
+                document_id=document_id,
+                document_text=result['document_text'],
+                extracted_data=result['extracted_data'],
+                parameters_list=result['parameters_list'],
+                refined_text=result['refined_text'],
+                status='completed'
+            )
+            
+            logger.info(f"PaddleOCR document processed successfully: ID={document_id}")
+            
+            return jsonify({
+                'success': True,
+                'document_id': document_id,
+                'message': 'Document processed successfully with PaddleOCR'
+            })
+        except Exception as process_error:
+            logger.error(f"Error processing PaddleOCR document: {str(process_error)}")
+            # Update status to error
+            try:
+                db.update_ocr_document(document_id, status='error')
+            except:
+                pass
+            
+            return jsonify({
+                'success': False,
+                'error': f'Error processing document: {str(process_error)}'
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Error in PaddleOCR upload: {str(e)}", exc_info=True)
         return jsonify({
             'success': False,
             'error': str(e)

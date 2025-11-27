@@ -55,6 +55,15 @@ function setupEventListeners() {
         });
     }
     
+    // PaddleOCR upload button
+    const paddleocrUploadButton = document.getElementById('paddleocrUploadButton');
+    if (paddleocrUploadButton) {
+        paddleocrUploadButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            uploadDocumentPaddleOCR();
+        });
+    }
+    
     // Refresh results button
     const refreshResultsBtn = document.getElementById('refreshResultsBtn');
     if (refreshResultsBtn) {
@@ -67,6 +76,97 @@ function setupEventListeners() {
         closeDetailsBtn.addEventListener('click', () => {
             document.getElementById('documentDetailsCard').style.display = 'none';
         });
+    }
+}
+
+// Upload document with PaddleOCR
+async function uploadDocumentPaddleOCR() {
+    const fileInput = document.getElementById('documentFile');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        showStatusMessage('Please select a file', 'error');
+        return;
+    }
+    
+    // Validate file type
+    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
+    if (!allowedTypes.includes(file.type)) {
+        showStatusMessage('Invalid file type. Please upload PDF, PNG, or JPG files', 'error');
+        return;
+    }
+    
+    // Validate file size (max 10MB)
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (file.size > maxSize) {
+        showStatusMessage('File size exceeds 10MB limit', 'error');
+        return;
+    }
+    
+    // Disable button and show loading
+    const uploadButton = document.getElementById('paddleocrUploadButton');
+    const buttonText = uploadButton.querySelector('span');
+    uploadButton.disabled = true;
+    if (buttonText) {
+        buttonText.textContent = 'Processing with PaddleOCR...';
+    }
+    
+    showStatusMessage('Uploading document for PaddleOCR processing...', 'info');
+    
+    // Create FormData
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/ocr/paddleocr-upload`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            // Try to get error message from response
+            let errorMessage = `Server error: ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                // If response is not JSON, use status text
+                errorMessage = response.statusText || errorMessage;
+            }
+            throw new Error(errorMessage);
+        }
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showStatusMessage(`Document uploaded successfully with PaddleOCR! Document ID: ${data.document_id}`, 'success');
+            document.getElementById('processingPanel').style.display = 'block';
+            updateProcessingStatus({
+                id: data.document_id,
+                file_name: file.name,
+                status: 'processing',
+                created_at: new Date().toISOString()
+            });
+            
+            // Poll for processing status
+            startProcessingPolling(data.document_id);
+            
+            // Reset form
+            fileInput.value = '';
+        } else {
+            showStatusMessage(`Error: ${data.error}`, 'error');
+            uploadButton.disabled = false;
+            if (buttonText) {
+                buttonText.textContent = 'Upload & Process (PaddleOCR)';
+            }
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showStatusMessage(`Error uploading document: ${error.message}`, 'error');
+        uploadButton.disabled = false;
+        if (buttonText) {
+            buttonText.textContent = 'Upload & Process (PaddleOCR)';
+        }
     }
 }
 
