@@ -64,6 +64,24 @@ function setupEventListeners() {
         });
     }
     
+    // Text Extraction upload button
+    const textExtractionButton = document.getElementById('textExtractionButton');
+    if (textExtractionButton) {
+        textExtractionButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            uploadDocumentTextExtraction();
+        });
+    }
+    
+    // Document Processing upload button
+    const documentProcessingButton = document.getElementById('documentProcessingButton');
+    if (documentProcessingButton) {
+        documentProcessingButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            uploadDocumentProcessing();
+        });
+    }
+    
     // Refresh results button
     const refreshResultsBtn = document.getElementById('refreshResultsBtn');
     if (refreshResultsBtn) {
@@ -166,6 +184,183 @@ async function uploadDocumentPaddleOCR() {
         uploadButton.disabled = false;
         if (buttonText) {
             buttonText.textContent = 'Upload & Process (PaddleOCR)';
+        }
+    }
+}
+
+// Upload document with Text Extraction (PyMuPDF)
+async function uploadDocumentTextExtraction() {
+    const fileInput = document.getElementById('documentFile');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        showStatusMessage('Please select a file', 'error');
+        return;
+    }
+    
+    // Validate file type
+    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
+    if (!allowedTypes.includes(file.type)) {
+        showStatusMessage('Invalid file type. Please upload PDF, PNG, or JPG files', 'error');
+        return;
+    }
+    
+    // Validate file size (max 10MB)
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (file.size > maxSize) {
+        showStatusMessage('File size exceeds 10MB limit', 'error');
+        return;
+    }
+    
+    // Disable button and show loading
+    const uploadButton = document.getElementById('textExtractionButton');
+    const buttonText = uploadButton.querySelector('span');
+    uploadButton.disabled = true;
+    if (buttonText) {
+        buttonText.textContent = 'Processing...';
+    }
+    
+    showStatusMessage('Uploading document for text extraction...', 'info');
+    
+    // Create FormData
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/ocr/text-extraction-upload`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            let errorMessage = `Server error: ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                errorMessage = response.statusText || errorMessage;
+            }
+            throw new Error(errorMessage);
+        }
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showStatusMessage(`Document processed successfully! Document ID: ${data.document_id}`, 'success');
+            document.getElementById('processingPanel').style.display = 'block';
+            updateProcessingStatus({
+                id: data.document_id,
+                file_name: file.name,
+                status: 'processing',
+                created_at: new Date().toISOString()
+            });
+            
+            // Poll for processing status
+            startProcessingPolling(data.document_id);
+            
+            // Reset form
+            fileInput.value = '';
+        } else {
+            showStatusMessage(`Error: ${data.error}`, 'error');
+            uploadButton.disabled = false;
+            if (buttonText) {
+                buttonText.textContent = 'Text Extraction (PyMuPDF)';
+            }
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showStatusMessage(`Error uploading document: ${error.message}`, 'error');
+        uploadButton.disabled = false;
+        if (buttonText) {
+            buttonText.textContent = 'Text Extraction (PyMuPDF)';
+        }
+    }
+}
+
+// Upload document with Document Processing (Table Extraction)
+async function uploadDocumentProcessing() {
+    const fileInput = document.getElementById('documentFile');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        showStatusMessage('Please select a file', 'error');
+        return;
+    }
+    
+    // Validate file type - only PDF for document processing
+    if (file.type !== 'application/pdf') {
+        showStatusMessage('Invalid file type. Only PDF files are supported for document processing', 'error');
+        return;
+    }
+    
+    // Validate file size (max 10MB)
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (file.size > maxSize) {
+        showStatusMessage('File size exceeds 10MB limit', 'error');
+        return;
+    }
+    
+    // Disable button and show loading
+    const uploadButton = document.getElementById('documentProcessingButton');
+    const buttonText = uploadButton.querySelector('span');
+    uploadButton.disabled = true;
+    if (buttonText) {
+        buttonText.textContent = 'Processing...';
+    }
+    
+    showStatusMessage('Uploading document for table extraction...', 'info');
+    
+    // Create FormData
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/ocr/document-processing-upload`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            let errorMessage = `Server error: ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                errorMessage = response.statusText || errorMessage;
+            }
+            throw new Error(errorMessage);
+        }
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showStatusMessage(`Document processed successfully! ${data.message}`, 'success');
+            document.getElementById('processingPanel').style.display = 'block';
+            updateProcessingStatus({
+                id: data.document_id,
+                file_name: file.name,
+                status: 'processing',
+                created_at: new Date().toISOString()
+            });
+            
+            // Poll for processing status
+            startProcessingPolling(data.document_id);
+            
+            // Reset form
+            fileInput.value = '';
+        } else {
+            showStatusMessage(`Error: ${data.error}`, 'error');
+            uploadButton.disabled = false;
+            if (buttonText) {
+                buttonText.textContent = 'Document Processing (Tables)';
+            }
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showStatusMessage(`Error uploading document: ${error.message}`, 'error');
+        uploadButton.disabled = false;
+        if (buttonText) {
+            buttonText.textContent = 'Document Processing (Tables)';
         }
     }
 }

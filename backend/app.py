@@ -19,6 +19,11 @@ except ImportError as e:
     logger.warning(f"PaddleOCR handler not available: {str(e)}")
     PaddleOCRHandler = None
     PADDLEOCR_AVAILABLE = False
+
+# Import new handlers for text extraction and document processing
+from text_extraction_handler import TextExtractionHandler
+from document_processing_handler import DocumentProcessingHandler
+
 import logging
 import json
 import os
@@ -47,6 +52,12 @@ if PADDLEOCR_AVAILABLE and PaddleOCRHandler:
         paddleocr_handler = None
 else:
     logger.info("PaddleOCR not available - install with: pip install paddleocr paddlepaddle")
+
+# Initialize new handlers for text extraction and document processing
+text_extraction_handler = TextExtractionHandler()
+document_processing_handler = DocumentProcessingHandler()
+logger.info("Text extraction and document processing handlers initialized")
+
 demo_mode = DemoMode()
 
 # Check if demo mode is enabled
@@ -1114,6 +1125,185 @@ def paddleocr_upload():
         
     except Exception as e:
         logger.error(f"Error in PaddleOCR upload: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/ocr/text-extraction-upload', methods=['POST'])
+def text_extraction_upload():
+    """Upload and process document for text-only extraction using PyMuPDF"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({
+                'success': False,
+                'error': 'No file provided'
+            }), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({
+                'success': False,
+                'error': 'No file selected'
+            }), 400
+        
+        if not text_extraction_handler.allowed_file(file.filename):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid file type. Supported: PDF, PNG, JPG, JPEG'
+            }), 400
+        
+        # Get file info
+        file_name = file.filename
+        file_ext = file_name.rsplit('.', 1)[1].lower() if '.' in file_name else ''
+        file_size = len(file.read())
+        file.seek(0)  # Reset file pointer
+        
+        # Create document record in database
+        try:
+            document_id = db.create_ocr_document(file_name, file_ext, file_size)
+            logger.info(f"Text extraction document record created: ID={document_id}")
+        except Exception as db_error:
+            logger.error(f"Database error creating document: {str(db_error)}")
+            return jsonify({
+                'success': False,
+                'error': f'Database error: {str(db_error)}'
+            }), 500
+        
+        # Update status to processing
+        try:
+            db.update_ocr_document(document_id, status='processing')
+        except Exception as e:
+            logger.warning(f"Could not update document status: {str(e)}")
+        
+        # Process document for text extraction
+        try:
+            result = text_extraction_handler.process_uploaded_document(file, file_name)
+            
+            # Update document with extracted text (NO parameters list)
+            db.update_ocr_document(
+                document_id=document_id,
+                document_text=result['document_text'],
+                extracted_data=result['extracted_data'],
+                parameters_list=None,  # Explicitly set to None
+                refined_text=result['refined_text'],
+                status='completed'
+            )
+            
+            logger.info(f"Text extraction document processed successfully: ID={document_id}")
+            
+            return jsonify({
+                'success': True,
+                'document_id': document_id,
+                'message': 'Document processed successfully (text only)'
+            })
+        except Exception as process_error:
+            logger.error(f"Error processing document: {str(process_error)}")
+            # Update status to error
+            try:
+                db.update_ocr_document(document_id, status='error')
+            except:
+                pass
+            
+            return jsonify({
+                'success': False,
+                'error': f'Error processing document: {str(process_error)}'
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Error in text extraction upload: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/ocr/document-processing-upload', methods=['POST'])
+def document_processing_upload():
+    """Upload and process PDF for table extraction (PDF → HTML → Tables)"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({
+                'success': False,
+                'error': 'No file provided'
+            }), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({
+                'success': False,
+                'error': 'No file selected'
+            }), 400
+        
+        if not document_processing_handler.allowed_file(file.filename):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid file type. Only PDF files are supported for document processing'
+            }), 400
+        
+        # Get file info
+        file_name = file.filename
+        file_ext = file_name.rsplit('.', 1)[1].lower() if '.' in file_name else ''
+        file_size = len(file.read())
+        file.seek(0)  # Reset file pointer
+        
+        # Create document record in database
+        try:
+            document_id = db.create_ocr_document(file_name, file_ext, file_size)
+            logger.info(f"Document processing record created: ID={document_id}")
+        except Exception as db_error:
+            logger.error(f"Database error creating document: {str(db_error)}")
+            return jsonify({
+                'success': False,
+                'error': f'Database error: {str(db_error)}'
+            }), 500
+        
+        # Update status to processing
+        try:
+            db.update_ocr_document(document_id, status='processing')
+        except Exception as e:
+            logger.warning(f"Could not update document status: {str(e)}")
+        
+        # Process document for table extraction
+        try:
+            result = document_processing_handler.process_uploaded_document(file, file_name)
+            
+            # Update document with extracted data
+            db.update_ocr_document(
+                document_id=document_id,
+                document_text=result['document_text'],
+                extracted_data=result['extracted_data'],
+                parameters_list=None,  # No parameters list
+                refined_text=result['refined_text'],
+                status='completed'
+            )
+            
+            table_count = len(result['extracted_data']['tables']) if result.get('extracted_data') and result['extracted_data'].get('tables') else 0
+            logger.info(f"Document processing completed successfully: ID={document_id}, Tables found: {table_count}")
+            
+            return jsonify({
+                'success': True,
+                'document_id': document_id,
+                'message': f'Document processed successfully. Found {table_count} tables.'
+            })
+        except Exception as process_error:
+            logger.error(f"Error processing document: {str(process_error)}")
+            # Update status to error
+            try:
+                db.update_ocr_document(document_id, status='error')
+            except:
+                pass
+            
+            return jsonify({
+                'success': False,
+                'error': f'Error processing document: {str(process_error)}'
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Error in document processing upload: {str(e)}", exc_info=True)
         return jsonify({
             'success': False,
             'error': str(e)

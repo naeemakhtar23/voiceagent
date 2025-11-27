@@ -13,4 +13,6 @@ paddlepaddle>=2.5.0
 paddleocr>=2.7.0
 opencv-python>=4.5.0
 numpy>=1.21.0
+pdfplumber>=0.10.0
+pandas>=2.0.0
 
