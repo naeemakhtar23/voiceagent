@@ -95,6 +95,7 @@ class DocumentProcessingHandler:
                 
                 # Use PyMuPDF's native table finder (available in 1.23+)
                 try:
+                    # Try with default settings
                     tables = page.find_tables()
                     logger.info(f"Page {page_num + 1}: Found {len(tables)} tables using PyMuPDF")
                     
@@ -104,28 +105,39 @@ class DocumentProcessingHandler:
                             table_data = table.extract()
                             
                             if table_data and len(table_data) > 0:
-                                # First row as headers
-                                headers = table_data[0] if len(table_data) > 0 else []
-                                rows = table_data[1:] if len(table_data) > 1 else []
+                                # Filter out empty rows
+                                table_data = [row for row in table_data if any(cell and str(cell).strip() for cell in row)]
                                 
-                                # Convert to DataFrame for easier handling
-                                df = pd.DataFrame(rows, columns=headers)
-                                
-                                # Convert to dictionary format
-                                table_dict = {
-                                    'table_index': table_index + 1,
-                                    'page': page_num + 1,
-                                    'method': 'pymupdf',
-                                    'headers': headers,
-                                    'rows': df.values.tolist(),
-                                    'row_count': len(df),
-                                    'column_count': len(df.columns),
-                                    'dataframe': df.to_dict('records')  # Also include as records
-                                }
-                                
-                                all_tables.append(table_dict)
-                                table_index += 1
-                                logger.info(f"  Table {table_index}: {len(df)} rows x {len(df.columns)} columns")
+                                if len(table_data) > 0:
+                                    # First row as headers
+                                    headers = table_data[0] if len(table_data) > 0 else []
+                                    rows = table_data[1:] if len(table_data) > 1 else []
+                                    
+                                    # Clean headers - convert None to empty string
+                                    headers = [str(h).strip() if h is not None else '' for h in headers]
+                                    
+                                    # Convert to DataFrame for easier handling
+                                    df = pd.DataFrame(rows, columns=headers)
+                                    
+                                    # Remove completely empty rows and columns
+                                    df = df.dropna(how='all').dropna(axis=1, how='all')
+                                    
+                                    if len(df) > 0 and len(df.columns) > 0:
+                                        # Convert to dictionary format
+                                        table_dict = {
+                                            'table_index': table_index + 1,
+                                            'page': page_num + 1,
+                                            'method': 'pymupdf',
+                                            'headers': df.columns.tolist(),
+                                            'rows': df.values.tolist(),
+                                            'row_count': len(df),
+                                            'column_count': len(df.columns),
+                                            'dataframe': df.to_dict('records')  # Also include as records
+                                        }
+                                        
+                                        all_tables.append(table_dict)
+                                        table_index += 1
+                                        logger.info(f"  Table {table_index}: {len(df)} rows x {len(df.columns)} columns")
                                 
                         except Exception as table_error:
                             logger.warning(f"Error extracting table {table_idx + 1} from page {page_num + 1}: {str(table_error)}")
@@ -141,6 +153,11 @@ class DocumentProcessingHandler:
                     continue
             
             doc.close()
+            
+            # If no tables found with PyMuPDF, try pdfplumber as fallback
+            if len(all_tables) == 0:
+                logger.info("No tables found with PyMuPDF, trying pdfplumber as fallback...")
+                return self.extract_tables_pdfplumber(pdf_path)
             
             logger.info(f"✅ Successfully extracted {len(all_tables)} tables using PyMuPDF")
             return all_tables
@@ -168,39 +185,81 @@ class DocumentProcessingHandler:
             all_tables = []
             table_index = 0
             
+            # Define table settings for better detection
+            table_settings = {
+                "vertical_strategy": "lines_strict",  # Use strict line detection
+                "horizontal_strategy": "lines_strict",
+                "explicit_vertical_lines": [],
+                "explicit_horizontal_lines": [],
+                "snap_tolerance": 3,
+                "join_tolerance": 3,
+                "min_words_vertical": 1,
+                "min_words_horizontal": 1,
+            }
+            
             with pdfplumber.open(pdf_path) as pdf:
                 num_pages = len(pdf.pages)
                 logger.info(f"PDF has {num_pages} pages")
                 
                 for page_num, page in enumerate(pdf.pages):
-                    tables = page.extract_tables()
-                    logger.info(f"Page {page_num + 1}: Found {len(tables)} tables using pdfplumber")
+                    # Try with custom settings first
+                    tables = page.extract_tables(table_settings=table_settings)
+                    logger.info(f"Page {page_num + 1}: Found {len(tables)} tables using pdfplumber (custom settings)")
+                    
+                    # If no tables found, try with default settings
+                    if len(tables) == 0:
+                        logger.info(f"Page {page_num + 1}: No tables found with custom settings, trying default settings...")
+                        tables = page.extract_tables()
+                        logger.info(f"Page {page_num + 1}: Found {len(tables)} tables using pdfplumber (default settings)")
+                    
+                    # If still no tables, try with more lenient settings
+                    if len(tables) == 0:
+                        logger.info(f"Page {page_num + 1}: No tables found with default settings, trying lenient settings...")
+                        lenient_settings = {
+                            "vertical_strategy": "lines",  # More lenient
+                            "horizontal_strategy": "lines",
+                            "snap_tolerance": 5,
+                            "join_tolerance": 5,
+                        }
+                        tables = page.extract_tables(table_settings=lenient_settings)
+                        logger.info(f"Page {page_num + 1}: Found {len(tables)} tables using pdfplumber (lenient settings)")
                     
                     for table_idx, table in enumerate(tables):
                         if table and len(table) > 0:
                             try:
-                                # First row as headers
-                                headers = table[0] if len(table) > 0 else []
-                                rows = table[1:] if len(table) > 1 else []
+                                # Filter out completely empty rows
+                                table = [row for row in table if any(cell and str(cell).strip() for cell in row if cell is not None)]
                                 
-                                # Convert to DataFrame
-                                df = pd.DataFrame(rows, columns=headers)
-                                
-                                # Convert to dictionary format
-                                table_dict = {
-                                    'table_index': table_index + 1,
-                                    'page': page_num + 1,
-                                    'method': 'pdfplumber',
-                                    'headers': headers,
-                                    'rows': df.values.tolist(),
-                                    'row_count': len(df),
-                                    'column_count': len(df.columns),
-                                    'dataframe': df.to_dict('records')  # Also include as records
-                                }
-                                
-                                all_tables.append(table_dict)
-                                table_index += 1
-                                logger.info(f"  Table {table_index}: {len(df)} rows x {len(df.columns)} columns")
+                                if len(table) > 0:
+                                    # First row as headers
+                                    headers = table[0] if len(table) > 0 else []
+                                    rows = table[1:] if len(table) > 1 else []
+                                    
+                                    # Clean headers - convert None to empty string
+                                    headers = [str(h).strip() if h is not None else '' for h in headers]
+                                    
+                                    # Convert to DataFrame
+                                    df = pd.DataFrame(rows, columns=headers)
+                                    
+                                    # Remove completely empty rows and columns
+                                    df = df.dropna(how='all').dropna(axis=1, how='all')
+                                    
+                                    if len(df) > 0 and len(df.columns) > 0:
+                                        # Convert to dictionary format
+                                        table_dict = {
+                                            'table_index': table_index + 1,
+                                            'page': page_num + 1,
+                                            'method': 'pdfplumber',
+                                            'headers': df.columns.tolist(),
+                                            'rows': df.values.tolist(),
+                                            'row_count': len(df),
+                                            'column_count': len(df.columns),
+                                            'dataframe': df.to_dict('records')  # Also include as records
+                                        }
+                                        
+                                        all_tables.append(table_dict)
+                                        table_index += 1
+                                        logger.info(f"  Table {table_index}: {len(df)} rows x {len(df.columns)} columns")
                                 
                             except Exception as table_error:
                                 logger.warning(f"Error processing table {table_idx + 1} from page {page_num + 1}: {str(table_error)}")
