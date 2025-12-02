@@ -15,4 +15,5 @@ opencv-python>=4.5.0
 numpy>=1.21.0
 pdfplumber>=0.10.0
 pandas>=2.0.0
+google-cloud-dialogflow>=2.20.0
 

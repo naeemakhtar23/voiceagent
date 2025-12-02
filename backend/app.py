@@ -11,6 +11,14 @@ from database import Database
 from config import FLASK_PORT, FLASK_DEBUG
 from demo_mode import DemoMode
 
+import logging
+import json
+import os
+import re
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Try to import PaddleOCR handler (optional dependency)
 try:
     from paddleocr_handler import PaddleOCRHandler
@@ -24,13 +32,14 @@ except ImportError as e:
 from text_extraction_handler import TextExtractionHandler
 from document_processing_handler import DocumentProcessingHandler
 
-import logging
-import json
-import os
-import re
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Import voice bot handler
+try:
+    from voice_bot_handler import VoiceBotHandler
+    VOICE_BOT_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Voice bot handler not available: {str(e)}")
+    VoiceBotHandler = None
+    VOICE_BOT_AVAILABLE = False
 
 app = Flask(__name__, 
             template_folder='../frontend',
@@ -57,6 +66,16 @@ else:
 text_extraction_handler = TextExtractionHandler()
 document_processing_handler = DocumentProcessingHandler()
 logger.info("Text extraction and document processing handlers initialized")
+
+# Initialize voice bot handler
+voice_bot_handler = None
+if VOICE_BOT_AVAILABLE and VoiceBotHandler:
+    try:
+        voice_bot_handler = VoiceBotHandler()
+        logger.info("Voice bot handler initialized successfully")
+    except Exception as e:
+        logger.warning(f"Voice bot handler initialization failed: {str(e)}. Voice bot features will be unavailable.")
+        voice_bot_handler = None
 
 demo_mode = DemoMode()
 
@@ -92,6 +111,18 @@ def app_js():
 def ocr_js():
     """Serve OCR JavaScript file"""
     return send_from_directory('../frontend', 'ocr.js', mimetype='application/javascript')
+
+
+@app.route('/voice-bot')
+def voice_bot_page():
+    """Serve the Voice Bot page"""
+    return render_template('voice_bot.html')
+
+
+@app.route('/voice_bot.js')
+def voice_bot_js():
+    """Serve Voice Bot JavaScript file"""
+    return send_from_directory('../frontend', 'voice_bot.js', mimetype='application/javascript')
 
 
 @app.route('/api/initiate-call', methods=['POST'])
@@ -1346,6 +1377,128 @@ def get_ocr_document(document_id):
         logger.error(f"Error getting OCR document: {str(e)}", exc_info=True)
         return jsonify({
             'error': f'Error retrieving document: {str(e)}'
+        }), 500
+
+
+# Voice Bot API Routes
+@app.route('/api/voice-bot/start', methods=['POST'])
+def voice_bot_start():
+    """Start a new voice bot session"""
+    try:
+        if not voice_bot_handler:
+            return jsonify({
+                'success': False,
+                'error': 'Voice bot handler not available'
+            }), 503
+        
+        data = request.get_json(silent=True) or {}
+        user_id = data.get('user_id')
+        
+        session = voice_bot_handler.start_session(user_id)
+        return jsonify({
+            'success': True,
+            'session': session
+        })
+    except Exception as e:
+        logger.error(f"Error starting voice bot session: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/voice-bot/answer', methods=['POST'])
+def voice_bot_answer():
+    """Process voice bot answer"""
+    try:
+        if not voice_bot_handler:
+            return jsonify({
+                'success': False,
+                'error': 'Voice bot handler not available'
+            }), 503
+        
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': 'Request body is required'
+            }), 400
+        
+        session_id = data.get('session_id')
+        user_input = data.get('input')
+        input_type = data.get('input_type', 'text')  # 'text' or 'audio'
+        
+        if not session_id or not user_input:
+            return jsonify({
+                'success': False,
+                'error': 'session_id and input are required'
+            }), 400
+        
+        result = voice_bot_handler.process_answer(
+            session_id, 
+            user_input, 
+            input_type
+        )
+        
+        return jsonify({
+            'success': True,
+            'result': result
+        })
+    except ValueError as e:
+        logger.error(f"Value error processing voice bot answer: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 404
+    except Exception as e:
+        logger.error(f"Error processing voice bot answer: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/voice-bot/session/<session_id>', methods=['GET'])
+def get_voice_bot_session(session_id):
+    """Get voice bot session status"""
+    try:
+        if not voice_bot_handler:
+            return jsonify({
+                'success': False,
+                'error': 'Voice bot handler not available'
+            }), 503
+        
+        from voice_bot_handler import VOICE_BOT_QUESTIONS
+        
+        session = voice_bot_handler.get_session(session_id)
+        if not session:
+            return jsonify({
+                'success': False,
+                'error': 'Session not found'
+            }), 404
+        
+        from voice_bot_handler import VOICE_BOT_QUESTIONS
+        
+        call_id = session['call_id']
+        current_q = session['current_question']
+        question_text = VOICE_BOT_QUESTIONS[current_q] if current_q < len(VOICE_BOT_QUESTIONS) else None
+        
+        return jsonify({
+            'success': True,
+            'session': {
+                'session_id': session_id,
+                'call_id': call_id,
+                'current_question': current_q + 1,
+                'question_text': question_text,
+                'total_questions': len(VOICE_BOT_QUESTIONS),
+                'answers': session['answers']
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error getting voice bot session: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
         }), 500
 
 

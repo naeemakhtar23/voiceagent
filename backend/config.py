@@ -36,6 +36,18 @@ ELEVENLABS_WEBHOOK_SECRET = os.getenv('ELEVENLABS_WEBHOOK_SECRET', '')
 # Custom endpoint override (leave empty to use default attempts)
 ELEVENLABS_CALL_ENDPOINT = os.getenv('ELEVENLABS_CALL_ENDPOINT', '')
 
+# Dialogflow Configuration
+DIALOGFLOW_PROJECT_ID = os.getenv('DIALOGFLOW_PROJECT_ID', '')
+DIALOGFLOW_LANGUAGE_CODE = os.getenv('DIALOGFLOW_LANGUAGE_CODE', 'en')
+
+# Google Application Credentials (for Dialogflow)
+# Set this as an environment variable or in .env file: GOOGLE_APPLICATION_CREDENTIALS
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
+
+# Set the environment variable if provided (for Google Cloud libraries)
+if GOOGLE_APPLICATION_CREDENTIALS:
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
+
 # Application Settings
 APP_NAME = "Voice Call System"
 APP_VERSION = "1.0.0"
