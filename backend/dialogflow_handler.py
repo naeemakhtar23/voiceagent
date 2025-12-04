@@ -76,7 +76,7 @@ class DialogflowHandler:
             return self._fallback_intent_detection(text)
     
     def detect_intent_audio(self, session_id, audio_bytes, language_code=None):
-        """Detect intent from audio input"""
+        """Detect intent from audio input (non-streaming)"""
         if not self.is_available():
             logger.warning("Dialogflow not available for audio detection")
             return {'intent': 'unknown', 'confidence': 0.0, 'fulfillment_text': '', 'query_text': ''}
@@ -111,6 +111,86 @@ class DialogflowHandler:
             }
         except Exception as e:
             logger.error(f"Error detecting intent from audio: {str(e)}")
+            return {'intent': 'unknown', 'confidence': 0.0, 'fulfillment_text': '', 'query_text': ''}
+    
+    def detect_intent_streaming(self, session_id, audio_chunks_generator, language_code=None):
+        """
+        Detect intent from streaming audio input
+        This is the recommended approach for capturing the first utterance
+        
+        Args:
+            session_id: Dialogflow session ID
+            audio_chunks_generator: Generator that yields audio chunks (bytes)
+            language_code: Language code (defaults to configured language)
+        
+        Returns:
+            dict with intent, confidence, fulfillment_text, query_text
+        """
+        if not self.is_available():
+            logger.warning("Dialogflow not available for streaming audio detection")
+            return {'intent': 'unknown', 'confidence': 0.0, 'fulfillment_text': '', 'query_text': ''}
+        
+        try:
+            from google.cloud.dialogflow import StreamingDetectIntentRequest
+            from google.cloud.dialogflow import InputAudioConfig
+            from google.cloud.dialogflow import QueryInput
+            from google.cloud.dialogflow import StreamingDetectIntentResponse
+            
+            session = self.session_client.session_path(
+                self.project_id, session_id
+            )
+            
+            # Configure audio input
+            audio_config = InputAudioConfig(
+                audio_encoding=dialogflow.AudioEncoding.AUDIO_ENCODING_LINEAR_16,
+                sample_rate_hertz=16000,
+                language_code=language_code or self.language_code
+            )
+            
+            query_input = QueryInput(audio_config=audio_config)
+            
+            # Create streaming request generator
+            def request_generator():
+                # First request: configuration
+                yield StreamingDetectIntentRequest(
+                    session=session,
+                    query_input=query_input,
+                    single_utterance=True,  # CRITICAL: This captures short words like "yes" instantly
+                    output_audio_config=None
+                )
+                
+                # Subsequent requests: audio chunks
+                for audio_chunk in audio_chunks_generator:
+                    yield StreamingDetectIntentRequest(
+                        input_audio=audio_chunk
+                    )
+            
+            # Use streaming detect intent
+            responses = self.session_client.streaming_detect_intent(requests=request_generator())
+            
+            # Process responses
+            final_result = None
+            for response in responses:
+                if response.recognition_result:
+                    logger.info(f"Recognition result: {response.recognition_result}")
+                
+                if response.query_result:
+                    final_result = {
+                        'intent': response.query_result.intent.display_name if response.query_result.intent else 'unknown',
+                        'confidence': response.query_result.intent_detection_confidence,
+                        'fulfillment_text': response.query_result.fulfillment_text,
+                        'query_text': response.query_result.query_text,
+                        'is_final': response.query_result.intent_detection_confidence > 0.0
+                    }
+                    # If we got a confident result, return it immediately
+                    if final_result['is_final'] and final_result['confidence'] > 0.5:
+                        logger.info(f"Got final result: {final_result}")
+                        return final_result
+            
+            return final_result or {'intent': 'unknown', 'confidence': 0.0, 'fulfillment_text': '', 'query_text': ''}
+            
+        except Exception as e:
+            logger.error(f"Error detecting intent from streaming audio: {str(e)}", exc_info=True)
             return {'intent': 'unknown', 'confidence': 0.0, 'fulfillment_text': '', 'query_text': ''}
     
     def _fallback_intent_detection(self, text):

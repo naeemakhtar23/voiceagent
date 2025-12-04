@@ -22,7 +22,7 @@ DB_CONNECTION_STRING = os.getenv(
 # Webhook URL (set after Cloudflare Tunnel setup)
 # Use Cloudflare Tunnel: cloudflared tunnel --url http://localhost:5000
 # Copy the https://random-string.trycloudflare.com URL and set it here
-WEBHOOK_BASE_URL = os.getenv('WEBHOOK_BASE_URL', ' https://concerns-organ-quilt-tile.trycloudflare.com')
+WEBHOOK_BASE_URL = os.getenv('WEBHOOK_BASE_URL', 'https://resolution-trout-seeds-convicted.trycloudflare.com')
 
 # Flask Configuration
 FLASK_ENV = os.getenv('FLASK_ENV', 'development')

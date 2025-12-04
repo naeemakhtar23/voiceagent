@@ -140,8 +140,13 @@ class VoiceBotHandler:
             # Fallback to simple text matching
             intent_result = self.dialogflow._fallback_intent_detection(user_input)
         
-        # Map intent to answer
-        intent_name = intent_result['intent'].lower()
+        # Ensure intent_result has required fields
+        if not intent_result or not isinstance(intent_result, dict):
+            logger.warning(f"Invalid intent_result, using fallback: {intent_result}")
+            intent_result = self.dialogflow._fallback_intent_detection(user_input)
+        
+        # Ensure intent field exists
+        intent_name = intent_result.get('intent', 'unclear').lower() if intent_result else 'unclear'
         if 'yes' in intent_name or 'affirmative' in intent_name:
             answer = 'yes'
         elif 'no' in intent_name or 'negative' in intent_name:
@@ -157,7 +162,8 @@ class VoiceBotHandler:
             answer = 'skipped'
         else:
             # Try to extract yes/no from query text
-            query_lower = intent_result['query_text'].lower()
+            query_text = intent_result.get('query_text', user_input) if intent_result else user_input
+            query_lower = query_text.lower() if query_text else ''
             if any(word in query_lower for word in ['yes', 'yeah', 'yep', 'sure', 'correct', 'ok', 'okay']):
                 answer = 'yes'
             elif any(word in query_lower for word in ['no', 'nope', 'nah', 'incorrect', 'not']):

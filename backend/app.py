@@ -125,6 +125,12 @@ def voice_bot_js():
     return send_from_directory('../frontend', 'voice_bot.js', mimetype='application/javascript')
 
 
+@app.route('/dialogflow_voice.js')
+def dialogflow_voice_js():
+    """Serve Dialogflow Voice JavaScript file"""
+    return send_from_directory('../frontend', 'dialogflow_voice.js', mimetype='application/javascript')
+
+
 @app.route('/api/initiate-call', methods=['POST'])
 def initiate_call():
     """Initiate a voice call with questions"""
@@ -1452,6 +1458,68 @@ def voice_bot_answer():
         }), 404
     except Exception as e:
         logger.error(f"Error processing voice bot answer: {str(e)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/voice-bot/stream-audio', methods=['POST'])
+def voice_bot_stream_audio():
+    """Stream audio to Dialogflow ES for speech recognition"""
+    try:
+        if not voice_bot_handler:
+            return jsonify({
+                'success': False,
+                'error': 'Voice bot handler not available'
+            }), 503
+        
+        session_id = request.form.get('session_id')
+        if not session_id:
+            return jsonify({
+                'success': False,
+                'error': 'session_id is required'
+            }), 400
+        
+        # Get audio file from request
+        if 'audio' not in request.files:
+            return jsonify({
+                'success': False,
+                'error': 'Audio file is required'
+            }), 400
+        
+        audio_file = request.files['audio']
+        audio_bytes = audio_file.read()
+        
+        if len(audio_bytes) < 100:
+            return jsonify({
+                'success': False,
+                'error': 'Audio file too small'
+            }), 400
+        
+        logger.info(f"Received audio: {len(audio_bytes)} bytes for session {session_id}")
+        
+        # Process audio through Dialogflow ES
+        intent_result = voice_bot_handler.dialogflow.detect_intent_audio(
+            session_id, audio_bytes
+        )
+        
+        logger.info(f"Dialogflow result: {intent_result}")
+        
+        # Process the answer using the recognized text
+        result = voice_bot_handler.process_answer(
+            session_id,
+            intent_result.get('query_text', ''),
+            'text'  # We've already converted audio to text via Dialogflow
+        )
+        
+        return jsonify({
+            'success': True,
+            'result': result,
+            'intent': intent_result
+        })
+    except Exception as e:
+        logger.error(f"Error processing streaming audio: {str(e)}", exc_info=True)
         return jsonify({
             'success': False,
             'error': str(e)
