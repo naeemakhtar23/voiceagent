@@ -12,9 +12,20 @@ import json
 import logging
 import requests
 import re
+import hmac
+import hashlib
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# List of questions for the agent to ask (passed dynamically)
+LIST_OF_QUESTIONS = [
+    "Has an Enduring Power of Attorney been enacted for this client?",
+    "Has a Do Not Resuscitate (DNR) order been discussed with the client?",
+    "Has the client's family/whānau been informed about the client's CPR wishes?",
+    "Does the client identify with any iwi or hapū?",
+    "Has the client been offered cultural support, and did they accept or decline it?"
+]
 
 
 class ElevenLabsHandler:
@@ -935,3 +946,382 @@ After each answer, acknowledge it and move to the next question. When all questi
                     cleaned_question = cleaned_question[:-1].strip()
         
         return cleaned_question
+    
+    def create_agent_with_privacy(self, name="FormFillerAgent", description="A voice agent that asks form questions dynamically and sends filled form via webhook.", voice_id=None):
+        """
+        Create a new ElevenLabs agent with privacy settings and tool configuration
+        Uses dynamic questions passed via conversation_initiation_client_data
+    
+        Args:
+            name: Agent name
+            description: Agent description
+            voice_id: ElevenLabs voice ID (uses default if not provided)
+    
+        Returns:
+            Agent ID
+        """
+        if not self.api_key:
+            raise Exception("ElevenLabs API key not configured.")
+    
+        if not self.client:
+            raise Exception("ElevenLabs client not initialized.")
+    
+        try:
+            # Generic system prompt that reads questions from conversation context
+            system_prompt = """You are a helpful form assistant conducting a healthcare survey. You will receive a list of questions to ask from the conversation context.
+
+Instructions:
+- Wait for the questions to be provided in the conversation_initiation_client_data
+- Ask each question clearly, one at a time, and wait for the user's response
+- Extract yes/no answers from user speech (yes, yeah, yep, correct, no, nope, nah, incorrect, etc.)
+- After each answer, acknowledge it briefly and move to the next question
+- Once all questions are answered, compile the answers into a JSON object where each question number maps to a boolean value (true=yes, false=no)
+- Call the 'submit_form' tool with the compiled form_data when all questions are answered
+- Do not store or repeat sensitive information
+- Be respectful and patient with the user
+
+The questions will be provided in the format:
+- questions: array of question objects with 'text' field
+- questions_text: formatted text of all questions
+
+Use the questions from the conversation context to conduct the survey."""
+        
+            # Get default voice if not provided
+            if not voice_id:
+                try:
+                    voices = self.client.voices.get_all()
+                    if voices.voices:
+                        voice_id = voices.voices[0].voice_id
+                        logger.info(f"Using default voice: {voice_id}")
+                except:
+                    voice_id = "21m00Tcm4TlvDq8ikWAM"  # Default voice fallback
+        
+            # Create agent via API
+            agent_response = requests.post(
+                'https://api.elevenlabs.io/v1/convai/agents',
+                headers={
+                    'xi-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'name': name,
+                    'description': description,
+                    'voice_id': voice_id,
+                    'model_id': 'eleven_turbo_v2',  # High-intelligence LLM for tool calling
+                    'system_prompt': system_prompt,
+                    'language': 'en',
+                    'workflow': {
+                        'type': 'conversational',
+                        'max_turns': 15  # Allow enough turns for questions
+                    }
+                },
+                timeout=15
+            )
+        
+            if agent_response.status_code in [200, 201]:
+                agent_data = agent_response.json()
+                agent_id = agent_data.get('agent_id')
+        
+                # Configure privacy settings
+                self.update_agent_privacy(agent_id)
+        
+                # Create tool for form submission
+                self.create_form_submission_tool(agent_id)
+        
+                logger.info(f"✅ Created agent with privacy settings: {agent_id}")
+                return agent_id
+            else:
+                error_msg = agent_response.text[:200] if agent_response.text else "Unknown error"
+                raise Exception(f"Failed to create agent: {error_msg}")
+        
+        except Exception as e:
+            logger.error(f"Error creating agent: {str(e)}")
+            raise
+    
+    def update_agent_privacy(self, agent_id):
+        """
+        Configure privacy settings for an agent (no transcripts/recordings stored)
+        """
+        if not self.api_key:
+            raise Exception("ElevenLabs API key not configured.")
+    
+        try:
+            privacy_response = requests.patch(
+                f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}',
+                headers={
+                    'xi-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'privacy_settings': {
+                        'audio_retention': 'disabled',
+                        'transcript_retention_days': 0,
+                        'data_persistence': False
+                    }
+                },
+                timeout=15
+            )
+    
+            if privacy_response.status_code in [200, 201, 204]:
+                logger.info(f"✅ Updated privacy settings for agent {agent_id}")
+            else:
+                logger.warning(f"Could not update privacy settings: {privacy_response.status_code}")
+    
+        except Exception as e:
+            logger.warning(f"Error updating privacy settings: {str(e)}")
+    
+    def create_form_submission_tool(self, agent_id):
+        """
+        Create a webhook tool for form submission
+    
+        Args:
+            agent_id: Agent ID
+        """
+        if not self.api_key:
+            raise Exception("ElevenLabs API key not configured.")
+    
+        try:
+            # Build tool parameters - dynamic number of questions
+            parameters = [{
+                'name': 'form_data',
+                'type': 'object',
+                'description': 'JSON object with form answers. Keys should be question_1, question_2, etc. Each value should be a boolean (true=yes, false=no). The number of questions is dynamic based on the conversation context.',
+                'required': True,
+                'properties': {
+                    'question_1': {
+                        'type': 'boolean',
+                        'description': 'Answer to question 1 (true for yes, false for no)'
+                    },
+                    'question_2': {
+                        'type': 'boolean',
+                        'description': 'Answer to question 2 (true for yes, false for no)'
+                    }
+                    # Additional questions will be handled dynamically by the agent
+                }
+            }]
+    
+            tool_response = requests.post(
+                f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}/tools',
+                headers={
+                    'xi-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'name': 'submit_form',
+                    'description': 'Submit the filled form JSON to the webhook endpoint when all questions are answered. The form_data should contain question_1 through question_N as boolean values (true=yes, false=no).',
+                    'type': 'webhook',
+                    'method': 'POST',
+                    'url': f'{self.webhook_url}/api/elevenlabs-agent/submit-form',
+                    'parameters': parameters,
+                    'authentication': {
+                        'type': 'bearer',
+                        'token': self.webhook_secret or 'default_token'
+                    }
+                },
+                timeout=15
+            )
+    
+            if tool_response.status_code in [200, 201]:
+                logger.info(f"✅ Created form submission tool for agent {agent_id}")
+            else:
+                error_msg = tool_response.text[:200] if tool_response.text else "Unknown error"
+                logger.warning(f"Could not create tool: {error_msg}")
+    
+        except Exception as e:
+            logger.warning(f"Error creating tool: {str(e)}")
+    
+    def start_agent_session(self, user_id=None):
+        """
+        Start a new agent session for form filling using LIST_OF_QUESTIONS
+        Questions are passed dynamically via conversation_initiation_client_data
+    
+        Args:
+            user_id: Optional user ID
+    
+        Returns:
+            Dictionary with session_id, call_id, agent_id
+        """
+        import uuid
+    
+        if not self.agent_id:
+            raise Exception("ElevenLabs Agent ID not configured.")
+    
+        try:
+            # Generate session ID
+            session_id = str(uuid.uuid4())
+        
+            # Create call record in database
+            short_uuid = session_id.replace('-', '')[:8]
+            phone_number = f"EL-{short_uuid}"  # ElevenLabs prefix
+        
+            # Format questions for agent
+            questions_list = [{"text": q} for q in LIST_OF_QUESTIONS]
+            questions_text = "\n".join([f"Question {i+1}: {q}" for i, q in enumerate(LIST_OF_QUESTIONS)])
+        
+            questions_json = questions_list
+        
+            if self.db_available and self.db:
+                call_id = self.db.create_call(
+                    phone_number=phone_number,
+                    questions_json=questions_json
+                )
+            
+                # Save first question to database
+                self.db.save_question(
+                    call_id,
+                    LIST_OF_QUESTIONS[0],
+                    1
+                )
+            else:
+                call_id = int(short_uuid, 16) % 1000000  # Fallback ID
+        
+            # Store session info with questions
+            self.questions_cache[session_id] = {
+                'call_id': call_id,
+                'questions': LIST_OF_QUESTIONS,
+                'questions_list': questions_list,
+                'user_id': user_id,
+                'form_data': {},
+                'current_question': 0
+            }
+        
+            logger.info(f"Agent session started: session_id={session_id}, call_id={call_id}")
+        
+            return {
+                'session_id': session_id,
+                'call_id': call_id,
+                'agent_id': self.agent_id,
+                'total_questions': len(LIST_OF_QUESTIONS),
+                'first_question': LIST_OF_QUESTIONS[0],
+                'questions': LIST_OF_QUESTIONS  # Include questions in response
+            }
+        
+        except Exception as e:
+            logger.error(f"Error starting agent session: {str(e)}")
+            raise
+    
+    def handle_tool_call(self, tool_name, parameters, conversation_id=None):
+        """
+        Handle tool calls from the agent (e.g., submit_form)
+    
+        Args:
+            tool_name: Name of the tool called
+            parameters: Tool parameters
+            conversation_id: Conversation ID (optional)
+    
+        Returns:
+            Response dictionary
+        """
+        if tool_name == 'submit_form':
+            form_data = parameters.get('form_data', {})
+        
+            # Find session by conversation_id
+            session_id = None
+            if conversation_id:
+                # Search cache for conversation_id
+                for key, value in self.questions_cache.items():
+                    if isinstance(key, str) and key.endswith('_conversation_id') and value == conversation_id:
+                        session_id = key.replace('_conversation_id', '')
+                        break
+        
+            # If not found by conversation_id, try to find by form_data structure
+            if not session_id:
+                for key, session in self.questions_cache.items():
+                    if isinstance(session, dict) and session.get('call_id'):
+                        session_id = key
+                        break
+        
+            if session_id and session_id in self.questions_cache:
+                session = self.questions_cache[session_id]
+                call_id = session.get('call_id')
+            
+                # Map form_data to questions
+                # form_data has keys like "question_1", "question_2", etc. with boolean values
+                if self.db_available and self.db and call_id:
+                    try:
+                        question_num = 1
+                        for i, question_text in enumerate(LIST_OF_QUESTIONS):
+                            field_name = f"question_{i+1}"
+                            answer_value = form_data.get(field_name, False)
+                        
+                            # Convert boolean to yes/no string
+                            answer = 'yes' if answer_value else 'no'
+                        
+                            # Check if question already exists
+                            existing_questions = self.db.get_call_questions(call_id)
+                            existing_question = next(
+                                (q for q in existing_questions
+                                 if q.get('question_number') == question_num),
+                                None
+                            )
+                        
+                            if not existing_question:
+                                # Insert new question
+                                self.db.save_question(
+                                    call_id=call_id,
+                                    question_text=question_text,
+                                    question_number=question_num
+                                )
+                        
+                            # Update answer
+                            self.db.save_answer(
+                                call_id=call_id,
+                                question_num=question_num,
+                                answer=answer,
+                                confidence=1.0,
+                                raw_response=answer
+                            )
+                        
+                            logger.info(f"✅ Saved Q{question_num}: {answer}")
+                            question_num += 1
+                    
+                        # Complete call
+                        self.db.complete_call(call_id)
+                    
+                        # Save results
+                        results = self.db.get_call_results_json(call_id)
+                    
+                        logger.info(f"✅ Form submitted successfully: call_id={call_id}")
+                    
+                        return {
+                            'status': 'success',
+                            'message': 'Form submitted successfully',
+                            'call_id': call_id,
+                            'results': results
+                        }
+                    except Exception as db_error:
+                        logger.error(f"Error saving form data: {str(db_error)}")
+                        return {
+                            'status': 'error',
+                            'message': f'Database error: {str(db_error)}'
+                        }
+        
+            return {
+                'status': 'success',
+                'message': 'Form received'
+            }
+    
+        return {
+            'status': 'unknown_tool',
+            'message': f'Unknown tool: {tool_name}'
+        }
+    
+    def validate_webhook_signature(self, timestamp, body, signature):
+        """
+        Validate ElevenLabs webhook signature for security
+        """
+        if not self.webhook_secret:
+            logger.warning("Webhook secret not configured - skipping signature validation")
+            return True
+    
+        try:
+            expected = f"t={timestamp},v0={hmac.new(
+                self.webhook_secret.encode(),
+                f"{timestamp}.{body}".encode(),
+                hashlib.sha256
+            ).hexdigest()}"
+    
+            return hmac.compare_digest(signature, expected)
+        except Exception as e:
+            logger.error(f"Error validating signature: {str(e)}")
+            return False

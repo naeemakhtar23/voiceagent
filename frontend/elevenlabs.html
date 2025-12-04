@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ElevenLabs Voice Agent - Healthcare Form</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                    </svg>
+                    <span>ElevenLabs Agent</span>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/" class="nav-item">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                        <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                    </svg>
+                    <span>← Back to Main</span>
+                </a>
+            </nav>
+        </aside>
+
+        <main class="main-content">
+            <header class="main-header">
+                <div class="header-content">
+                    <h1>ElevenLabs Voice Agent</h1>
+                    <p class="header-subtitle">Privacy-Focused Healthcare Form Filling</p>
+                </div>
+            </header>
+
+            <section id="startSession" class="content-section active">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Start Voice Agent Session</h2>
+                        <p class="card-subtitle">The agent will ask 5 healthcare questions</p>
+                    </div>
+                    <div class="card-body">
+                        <div class="questions-preview" style="margin-bottom: 20px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                            <h3 style="margin-top: 0;">Questions to be asked:</h3>
+                            <ol style="line-height: 1.8;">
+                                <li>Has an Enduring Power of Attorney been enacted for this client?</li>
+                                <li>Has a Do Not Resuscitate (DNR) order been discussed with the client?</li>
+                                <li>Has the client's family/whānau been informed about the client's CPR wishes?</li>
+                                <li>Does the client identify with any iwi or hapū?</li>
+                                <li>Has the client been offered cultural support, and did they accept or decline it?</li>
+                            </ol>
+                        </div>
+                        <button id="startAgentSessionBtn" class="btn-primary">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                            </svg>
+                            <span>Start Agent Session</span>
+                        </button>
+                        <div id="statusMessage" class="status-message"></div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="activeSession" class="content-section" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Active Session</h2>
+                        <div class="card-actions">
+                            <button id="endSessionBtn" class="btn-icon">End Session</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="sessionInfo" class="session-info" style="margin-bottom: 20px;"></div>
+                        <div id="conversationStatus" class="conversation-status" style="padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                            <p style="margin: 0;">Conversation in progress... The agent will ask questions and collect answers.</p>
+                            <p style="margin: 10px 0 0 0; color: #666; font-size: 0.9em;">Note: Connect to the agent via ElevenLabs widget, phone, or WebSocket to interact.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="results" class="content-section" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Form Submission Results</h2>
+                    </div>
+                    <div class="card-body">
+                        <div id="formResults" class="form-results"></div>
+                        <button id="viewResultsBtn" class="btn-primary" style="margin-top: 20px;">View Full Results</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="elevenlabs.js"></script>
+</body>
+</html>
+

@@ -130,6 +130,11 @@ def dialogflow_voice_js():
     """Serve Dialogflow Voice JavaScript file"""
     return send_from_directory('../frontend', 'dialogflow_voice.js', mimetype='application/javascript')
 
+@app.route('/elevenlabs.js')
+def elevenlabs_js():
+    """Serve ElevenLabs JavaScript file"""
+    return send_from_directory('../frontend', 'elevenlabs.js', mimetype='application/javascript')
+
 
 @app.route('/api/initiate-call', methods=['POST'])
 def initiate_call():
@@ -1568,6 +1573,110 @@ def get_voice_bot_session(session_id):
             'success': False,
             'error': str(e)
         }), 500
+
+
+# ElevenLabs Agent Routes
+@app.route('/elevenlabs')
+def elevenlabs_page():
+    """Serve the ElevenLabs agent page"""
+    return send_from_directory('../frontend', 'elevenlabs.html')
+
+@app.route('/api/elevenlabs-agent/start', methods=['POST'])
+def start_elevenlabs_agent_session():
+    """Start a new ElevenLabs agent session"""
+    try:
+        data = request.get_json() or {}
+        
+        session = elevenlabs_handler.start_agent_session(
+            user_id=data.get('user_id')
+        )
+        
+        return jsonify({
+            'success': True,
+            'session': session
+        })
+    except Exception as e:
+        logger.error(f"Error starting agent session: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/elevenlabs-agent/submit-form', methods=['POST'])
+def submit_elevenlabs_form():
+    """Webhook endpoint to receive filled form from agent tool call"""
+    try:
+        # Validate signature
+        timestamp = request.headers.get('ElevenLabs-Timestamp')
+        signature = request.headers.get('ElevenLabs-Signature')
+        
+        if timestamp and signature:
+            body = request.data.decode('utf-8')
+            if not elevenlabs_handler.validate_webhook_signature(timestamp, body, signature):
+                return jsonify({'error': 'Invalid signature'}), 401
+        
+        # Parse payload
+        payload = request.json
+        tool_name = payload.get('tool', '')
+        parameters = payload.get('parameters', {})
+        conversation_id = payload.get('conversation_id')
+        
+        if tool_name == 'submit_form':
+            result = elevenlabs_handler.handle_tool_call(
+                tool_name='submit_form',
+                parameters=parameters,
+                conversation_id=conversation_id
+            )
+            
+            return jsonify(result), 200
+        else:
+            return jsonify({'error': 'Unknown tool'}), 400
+            
+    except Exception as e:
+        logger.error(f"Error processing form submission: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/elevenlabs-agent/webhook', methods=['POST'])
+def elevenlabs_agent_webhook():
+    """Webhook endpoint for ElevenLabs agent events"""
+    try:
+        webhook_data = request.json
+        
+        event_type = webhook_data.get('event_type') or webhook_data.get('type')
+        
+        if event_type == 'tool_called':
+            tool_data = webhook_data.get('data', {})
+            tool_name = tool_data.get('tool', '')
+            parameters = tool_data.get('parameters', {})
+            conversation_id = webhook_data.get('conversation_id')
+            
+            result = elevenlabs_handler.handle_tool_call(
+                tool_name=tool_name,
+                parameters=parameters,
+                conversation_id=conversation_id
+            )
+            
+            return jsonify(result), 200
+        
+        # Handle other events
+        result = elevenlabs_handler.handle_webhook(webhook_data)
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error processing agent webhook: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/elevenlabs-agent/end/<session_id>', methods=['POST'])
+def end_elevenlabs_agent_session(session_id):
+    """End an agent session"""
+    try:
+        if session_id in elevenlabs_handler.questions_cache:
+            del elevenlabs_handler.questions_cache[session_id]
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error ending session: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 if __name__ == '__main__':
