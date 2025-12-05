@@ -1195,9 +1195,19 @@ WHAT TO DO:
 ✅ Ask ONLY those 5 questions, in order
 ✅ Wait for yes/no answer before next question
 ✅ Extract answers: yes/yeah/yep/correct = true, no/nope/nah/incorrect = false
-✅ After all 5 questions answered, call submit_form tool
+✅ After ALL 5 questions answered, call submit_form tool with form_data containing ALL questions:
+   {
+     "form_data": {
+       "question_1": true/false,
+       "question_2": true/false,
+       "question_3": true/false,
+       "question_4": true/false,
+       "question_5": true/false
+     }
+   }
+🚨 CRITICAL: You MUST include ALL 5 questions (question_1 through question_5) in the form_data. Do NOT submit with only question_1.
 
-REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use the default greeting."""
+REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use the default greeting. You MUST submit ALL 5 answers in the form_data."""
         
         try:
             # Try updating at root level first (for backward compatibility)
@@ -1588,7 +1598,7 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
             parameters = [{
                 'name': 'form_data',
                 'type': 'object',
-                'description': f'JSON object with form answers. Keys should be question_1 through question_{num_questions}. Each value should be a boolean (true=yes, false=no). Include all questions that were asked.',
+                'description': f'JSON object with form answers. Keys MUST be question_1 through question_{num_questions}. Each value should be a boolean (true=yes, false=no). You MUST include ALL {num_questions} questions that were asked. Missing questions will cause the submission to fail.',
                 'required': True,
                 'properties': properties
             }]
@@ -1601,7 +1611,7 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
                 },
                 json={
                     'name': 'submit_form',
-                    'description': f'Submit the filled form JSON to the webhook endpoint when all questions are answered. The form_data should contain question_1 through question_{num_questions} as boolean values (true=yes, false=no).',
+                    'description': f'Submit the filled form JSON to the webhook endpoint when ALL questions are answered. The form_data MUST contain ALL questions from question_1 through question_{num_questions} as boolean values (true=yes, false=no). You MUST include every question that was asked. Example: {{"form_data": {{"question_1": true, "question_2": false, "question_3": true, "question_4": false, "question_5": true}}}}',
                     'type': 'webhook',
                     'method': 'POST',
                     'url': f'{self.webhook_url}/api/elevenlabs-agent/submit-form',
@@ -1771,6 +1781,26 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
         """
         if tool_name == 'submit_form':
             form_data = parameters.get('form_data', {})
+            
+            # Validate that all questions are present
+            expected_questions = len(LIST_OF_QUESTIONS)
+            missing_questions = []
+            for i in range(1, expected_questions + 1):
+                question_key = f'question_{i}'
+                if question_key not in form_data:
+                    missing_questions.append(question_key)
+            
+            if missing_questions:
+                error_msg = f'Missing questions in form_data: {", ".join(missing_questions)}. You must include ALL {expected_questions} questions (question_1 through question_{expected_questions}) in the form_data.'
+                logger.warning(f"❌ Form submission incomplete: {error_msg}")
+                logger.warning(f"Received form_data: {form_data}")
+                return {
+                    'status': 'error',
+                    'message': error_msg,
+                    'received_questions': list(form_data.keys()),
+                    'expected_questions': [f'question_{i}' for i in range(1, expected_questions + 1)],
+                    'missing_questions': missing_questions
+                }
         
             # Find session by conversation_id
             session_id = None

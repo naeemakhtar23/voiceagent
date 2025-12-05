@@ -187,8 +187,10 @@ Instructions:
 - Wait for the user's response (yes/no)
 - Extract yes/no answers (yes, yeah, yep, correct, no, nope, nah, incorrect, etc.)
 - After each answer, acknowledge it briefly and move to the next question
-- Once all questions are answered, compile the answers into a JSON object where each question number maps to a boolean value (true=yes, false=no)
-- Call the 'submit_form' tool with the compiled form_data when all questions are answered
+- Once ALL questions are answered, compile the answers into a JSON object where each question number maps to a boolean value (true=yes, false=no)
+- You MUST include ALL questions in the form_data: {"form_data": {"question_1": true/false, "question_2": true/false, "question_3": true/false, "question_4": true/false, "question_5": true/false}}
+- Call the 'submit_form' tool with the compiled form_data containing ALL questions when all questions are answered
+- Do NOT submit with only question_1 - you MUST include all questions
 - Do NOT ask the user to provide questions - they are listed above
 - Start asking the questions immediately after greeting the user`,
             override_first_message: first_question 
