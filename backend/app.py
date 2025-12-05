@@ -845,6 +845,62 @@ def get_call_results(call_id):
                 'error': f'Error retrieving call results: {error_msg}'
             }), 500
 
+@app.route('/api/calls/<int:call_id>/results', methods=['GET'])
+def get_call_results_alt(call_id):
+    """Get call results as JSON (alternative route format)"""
+    try:
+        # Get call data to check status
+        call_data = db.get_call_data(call_id)
+        if not call_data:
+            return jsonify({
+                'status': 'not_found',
+                'error': 'Call not found'
+            }), 404
+        
+        call_status = call_data.get('status', 'unknown')
+        
+        # Get results
+        results = db.get_call_results_json(call_id)
+        
+        # Only return 'completed' if we have actual results with answers
+        if results and results.get('questions'):
+            # Check if we have at least one question with an answer
+            has_answers = any(
+                q.get('answer') and q.get('answer') != 'unclear' 
+                for q in results.get('questions', [])
+            )
+            
+            if has_answers and call_status == 'completed':
+                return jsonify({
+                    'status': 'completed',
+                    'results': results
+                })
+        
+        # Call exists but results not ready yet or no answers yet
+        return jsonify({
+            'status': 'in_progress',
+            'message': 'Call is still in progress or results are being processed',
+            'call_status': call_status,
+            'has_results': bool(results and results.get('questions')),
+            'has_answers': bool(results and any(
+                q.get('answer') and q.get('answer') != 'unclear' 
+                for q in results.get('questions', [])
+            )) if results else False
+        })
+    except Exception as e:
+        logger.error(f"Error getting call results: {str(e)}")
+        error_msg = str(e)
+        if 'IM002' in error_msg or 'connection' in error_msg.lower():
+            return jsonify({
+                'status': 'error',
+                'error': 'Database connection issue. Please check database configuration.'
+            }), 503
+        else:
+            return jsonify({
+                'status': 'error',
+                'error': f'Error retrieving call results: {error_msg}'
+            }), 500
+
 
 @app.route('/api/calls', methods=['GET'])
 def get_calls():
@@ -1585,27 +1641,50 @@ def elevenlabs_page():
 def start_elevenlabs_agent_session():
     """Start a new ElevenLabs agent session"""
     try:
-        data = request.get_json() or {}
+        # Get JSON data from request - handle empty body gracefully
+        data = {}
+        if request.content_length and request.content_length > 0:
+            try:
+                data = request.get_json(force=True, silent=True) or {}
+            except Exception as json_error:
+                logger.warning(f"Could not parse JSON from request (using empty dict): {str(json_error)}")
+                data = {}
+        else:
+            # Empty body is fine - use empty dict
+            logger.info("Request has empty body, using empty data dict")
+            data = {}
+        
+        logger.info(f"Starting ElevenLabs agent session, user_id: {data.get('user_id')}")
         
         session = elevenlabs_handler.start_agent_session(
             user_id=data.get('user_id')
         )
+        
+        logger.info(f"Agent session started successfully: session_id={session.get('session_id')}, call_id={session.get('call_id')}")
         
         return jsonify({
             'success': True,
             'session': session
         })
     except Exception as e:
-        logger.error(f"Error starting agent session: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"Error starting agent session: {error_msg}", exc_info=True)
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': error_msg
         }), 500
 
 @app.route('/api/elevenlabs-agent/submit-form', methods=['POST'])
 def submit_elevenlabs_form():
     """Webhook endpoint to receive filled form from agent tool call"""
+    log_id = None
     try:
+        # Get webhook data
+        if request.is_json:
+            webhook_data = request.json
+        else:
+            webhook_data = request.form.to_dict()
+        
         # Validate signature
         timestamp = request.headers.get('ElevenLabs-Timestamp')
         signature = request.headers.get('ElevenLabs-Signature')
@@ -1616,10 +1695,26 @@ def submit_elevenlabs_form():
                 return jsonify({'error': 'Invalid signature'}), 401
         
         # Parse payload
-        payload = request.json
+        payload = webhook_data
         tool_name = payload.get('tool', '')
         parameters = payload.get('parameters', {})
         conversation_id = payload.get('conversation_id')
+        
+        # Save webhook to logs table BEFORE processing
+        if elevenlabs_handler.db_available and elevenlabs_handler.db:
+            try:
+                log_id = elevenlabs_handler.db.save_webhook_log(
+                    event_type='tool_called',
+                    conversation_id=conversation_id,
+                    call_id=None,  # Will be updated after processing if found
+                    call_sid=None,
+                    webhook_data=webhook_data,
+                    processed_successfully=False,  # Will update to True at end if successful
+                    error_message=None
+                )
+                logger.info(f"✅ Saved tool call webhook to logs table: log_id={log_id}, tool={tool_name}")
+            except Exception as log_error:
+                logger.warning(f"Could not save tool call webhook to logs table: {str(log_error)}")
         
         if tool_name == 'submit_form':
             result = elevenlabs_handler.handle_tool_call(
@@ -1628,23 +1723,89 @@ def submit_elevenlabs_form():
                 conversation_id=conversation_id
             )
             
+            # Update webhook log as successfully processed
+            if log_id and elevenlabs_handler.db_available and elevenlabs_handler.db:
+                try:
+                    # Try to get call_id from result if available
+                    call_id = result.get('call_id')
+                    update_query = """
+                    UPDATE webhook_logs 
+                    SET processed_successfully = 1, call_id = ?
+                    WHERE id = ?
+                    """
+                    elevenlabs_handler.db.execute(update_query, (call_id, log_id))
+                    logger.info(f"✅ Updated webhook log {log_id} as successfully processed")
+                except Exception as update_error:
+                    logger.warning(f"Could not update webhook log status: {str(update_error)}")
+            
             return jsonify(result), 200
         else:
+            # Update webhook log with error for unknown tool
+            if log_id and elevenlabs_handler.db_available and elevenlabs_handler.db:
+                try:
+                    update_query = """
+                    UPDATE webhook_logs 
+                    SET processed_successfully = 0, error_message = ?
+                    WHERE id = ?
+                    """
+                    elevenlabs_handler.db.execute(update_query, (f'Unknown tool: {tool_name}', log_id))
+                except Exception as update_error:
+                    logger.warning(f"Could not update webhook log with error: {str(update_error)}")
+            
             return jsonify({'error': 'Unknown tool'}), 400
             
     except Exception as e:
-        logger.error(f"Error processing form submission: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        error_msg = str(e)
+        logger.error(f"Error processing form submission: {error_msg}")
+        
+        # Update webhook log with error
+        if log_id and elevenlabs_handler.db_available and elevenlabs_handler.db:
+            try:
+                update_query = """
+                UPDATE webhook_logs 
+                SET processed_successfully = 0, error_message = ?
+                WHERE id = ?
+                """
+                elevenlabs_handler.db.execute(update_query, (error_msg[:4000], log_id))  # Limit error message length
+            except Exception as update_error:
+                logger.warning(f"Could not update webhook log with error: {str(update_error)}")
+        
+        return jsonify({'error': error_msg}), 500
 
 @app.route('/api/elevenlabs-agent/webhook', methods=['POST'])
 def elevenlabs_agent_webhook():
     """Webhook endpoint for ElevenLabs agent events"""
+    log_id = None
     try:
-        webhook_data = request.json
+        # Get webhook data
+        if request.is_json:
+            webhook_data = request.json
+        else:
+            webhook_data = request.form.to_dict()
         
         event_type = webhook_data.get('event_type') or webhook_data.get('type')
         
         if event_type == 'tool_called':
+            # For tool_called events, save to logs before processing
+            # (handle_webhook will handle other events and save them)
+            if elevenlabs_handler.db_available and elevenlabs_handler.db:
+                try:
+                    conversation_id = webhook_data.get('conversation_id')
+                    call_sid = webhook_data.get('call_sid') or webhook_data.get('callSid')
+                    
+                    log_id = elevenlabs_handler.db.save_webhook_log(
+                        event_type=event_type,
+                        conversation_id=conversation_id,
+                        call_id=None,  # Will be updated after processing if found
+                        call_sid=call_sid,
+                        webhook_data=webhook_data,
+                        processed_successfully=False,  # Will update to True at end if successful
+                        error_message=None
+                    )
+                    logger.info(f"✅ Saved tool_called webhook to logs table: log_id={log_id}")
+                except Exception as log_error:
+                    logger.warning(f"Could not save tool_called webhook to logs table: {str(log_error)}")
+            
             tool_data = webhook_data.get('data', {})
             tool_name = tool_data.get('tool', '')
             parameters = tool_data.get('parameters', {})
@@ -1656,15 +1817,44 @@ def elevenlabs_agent_webhook():
                 conversation_id=conversation_id
             )
             
+            # Update webhook log as successfully processed
+            if log_id and elevenlabs_handler.db_available and elevenlabs_handler.db:
+                try:
+                    # Try to get call_id from result if available
+                    call_id = result.get('call_id')
+                    update_query = """
+                    UPDATE webhook_logs 
+                    SET processed_successfully = 1, call_id = ?
+                    WHERE id = ?
+                    """
+                    elevenlabs_handler.db.execute(update_query, (call_id, log_id))
+                    logger.info(f"✅ Updated webhook log {log_id} as successfully processed")
+                except Exception as update_error:
+                    logger.warning(f"Could not update webhook log status: {str(update_error)}")
+            
             return jsonify(result), 200
         
-        # Handle other events
+        # Handle other events (handle_webhook will save to webhook_logs)
         result = elevenlabs_handler.handle_webhook(webhook_data)
         return jsonify(result), 200
         
     except Exception as e:
-        logger.error(f"Error processing agent webhook: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        error_msg = str(e)
+        logger.error(f"Error processing agent webhook: {error_msg}")
+        
+        # Update webhook log with error
+        if log_id and elevenlabs_handler.db_available and elevenlabs_handler.db:
+            try:
+                update_query = """
+                UPDATE webhook_logs 
+                SET processed_successfully = 0, error_message = ?
+                WHERE id = ?
+                """
+                elevenlabs_handler.db.execute(update_query, (error_msg[:4000], log_id))  # Limit error message length
+            except Exception as update_error:
+                logger.warning(f"Could not update webhook log with error: {str(update_error)}")
+        
+        return jsonify({'error': error_msg}), 500
 
 @app.route('/api/elevenlabs-agent/end/<session_id>', methods=['POST'])
 def end_elevenlabs_agent_session(session_id):
@@ -1677,6 +1867,254 @@ def end_elevenlabs_agent_session(session_id):
     except Exception as e:
         logger.error(f"Error ending session: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/elevenlabs-agent/config', methods=['GET'])
+def get_elevenlabs_agent_config():
+    """Get ElevenLabs agent configuration (agent_id)"""
+    try:
+        agent_id = elevenlabs_handler.agent_id
+        return jsonify({
+            'success': True,
+            'agent_id': agent_id
+        })
+    except Exception as e:
+        logger.error(f"Error getting agent config: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/elevenlabs-agent/update-prompt', methods=['POST', 'GET'])
+def update_elevenlabs_agent_prompt():
+    """Update the agent's system prompt to read questions from conversation_initiation_client_data"""
+    try:
+        agent_id = elevenlabs_handler.agent_id
+        if not agent_id:
+            return jsonify({
+                'success': False,
+                'error': 'Agent ID not configured'
+            }), 400
+        
+        success = elevenlabs_handler.update_agent_system_prompt(agent_id)
+        if success:
+            # Verify the update - wait a moment for it to propagate
+            import time
+            time.sleep(2)
+            
+            agent_details = elevenlabs_handler.get_agent_details(agent_id)
+            
+            # Check if it's an error response
+            if agent_details and isinstance(agent_details, dict) and agent_details.get('error'):
+                return jsonify({
+                    'success': False,
+                    'error': f"Could not verify update: {agent_details.get('error_message', 'Unknown error')}",
+                    'api_status_code': agent_details.get('status_code')
+                }), 500
+            
+            if agent_details:
+                # Check if it's an error response
+                if isinstance(agent_details, dict) and agent_details.get('error'):
+                    return jsonify({
+                        'success': False,
+                        'error': f"Could not verify update: {agent_details.get('error_message', 'Unknown error')}",
+                        'api_status_code': agent_details.get('status_code')
+                    }), 500
+                
+                # Try to find system prompt in nested structure
+                conversation_config = agent_details.get('conversation_config', {}) or {}
+                agent_config = conversation_config.get('agent', {}) or {}
+                
+                # Try to get system prompt from various locations
+                system_prompt = None
+                
+                # Check agent_config first (most likely location)
+                if isinstance(agent_config, dict):
+                    system_prompt = (
+                        agent_config.get('system_prompt') or 
+                        agent_config.get('systemPrompt') or
+                        agent_config.get('prompt')
+                    )
+                    # If it's a dict with a 'prompt' key, extract it
+                    if isinstance(system_prompt, dict) and 'prompt' in system_prompt:
+                        system_prompt = system_prompt.get('prompt')
+                
+                # Fallback to other locations
+                if not system_prompt:
+                    system_prompt = (
+                        agent_details.get('system_prompt') or 
+                        agent_details.get('systemPrompt') or
+                        agent_details.get('prompt') or
+                        conversation_config.get('system_prompt') or
+                        conversation_config.get('systemPrompt')
+                    )
+                
+                # If still a dict, try to extract the prompt value
+                if isinstance(system_prompt, dict):
+                    system_prompt = system_prompt.get('prompt') or system_prompt.get('system_prompt') or system_prompt.get('systemPrompt') or ''
+                
+                # Ensure it's a string
+                if system_prompt and not isinstance(system_prompt, str):
+                    system_prompt = str(system_prompt)
+                elif not system_prompt:
+                    system_prompt = ''
+                
+                # Ensure system_prompt is a string
+                if system_prompt and not isinstance(system_prompt, str):
+                    system_prompt = str(system_prompt)
+                elif not system_prompt:
+                    system_prompt = ''
+                
+                system_prompt_preview = None
+                if system_prompt and len(system_prompt) > 0:
+                    try:
+                        system_prompt_preview = system_prompt[:200] + '...' if len(system_prompt) > 200 else system_prompt
+                    except Exception as e:
+                        logger.warning(f"Could not create preview: {str(e)}")
+                        system_prompt_preview = str(system_prompt)[:200] if system_prompt else None
+                
+                # Determine where it was found
+                found_in = 'not_found'
+                if agent_config.get('system_prompt') or agent_config.get('systemPrompt'):
+                    found_in = 'conversation_config.agent'
+                elif agent_details.get('system_prompt') or agent_details.get('systemPrompt'):
+                    found_in = 'root'
+                elif conversation_config.get('system_prompt') or conversation_config.get('systemPrompt'):
+                    found_in = 'conversation_config'
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'Agent system prompt updated successfully',
+                    'system_prompt_length': len(system_prompt) if system_prompt else 0,
+                    'system_prompt_preview': system_prompt_preview,
+                    'found_in': found_in,
+                    'agent_config_keys': list(agent_config.keys()) if isinstance(agent_config, dict) else None,
+                    'conversation_config_keys': list(conversation_config.keys()) if isinstance(conversation_config, dict) else None
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Could not retrieve agent details to verify update'
+                }), 500
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to update agent system prompt'
+            }), 500
+    except Exception as e:
+        logger.error(f"Error updating agent prompt: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/elevenlabs-agent/verify', methods=['GET'])
+def verify_elevenlabs_agent():
+    """Verify agent configuration including system prompt"""
+    try:
+        agent_id = elevenlabs_handler.agent_id
+        if not agent_id:
+            return jsonify({
+                'success': False,
+                'error': 'Agent ID not configured'
+            }), 400
+        
+        try:
+            # Try to get agent details
+            agent_details = elevenlabs_handler.get_agent_details(agent_id)
+            
+            # Check if it's an error response
+            if agent_details and isinstance(agent_details, dict) and agent_details.get('error'):
+                return jsonify({
+                    'success': False,
+                    'error': f"API Error: {agent_details.get('error_message', 'Unknown error')}",
+                    'agent_id': agent_id,
+                    'api_status_code': agent_details.get('status_code'),
+                    'api_error_details': agent_details.get('response_text')
+                }), 500
+            
+            # If None (shouldn't happen now, but keep for safety)
+            if agent_details is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'Could not retrieve agent details (unexpected None response)',
+                    'agent_id': agent_id,
+                    'suggestion': 'Check server logs for detailed error message.'
+                }), 500
+        except Exception as get_error:
+            logger.error(f"Error getting agent details: {str(get_error)}", exc_info=True)
+            return jsonify({
+                'success': False,
+                'error': f'Error retrieving agent details: {str(get_error)}',
+                'agent_id': agent_id
+            }), 500
+        
+        if agent_details:
+            # Try different possible field names and nested locations for system prompt
+            # Based on ElevenLabs API structure, it's in conversation_config.agent
+            conversation_config = agent_details.get('conversation_config', {}) or {}
+            agent_config = conversation_config.get('agent', {}) or {}
+            
+            system_prompt = (
+                agent_details.get('system_prompt', '') or 
+                agent_details.get('systemPrompt', '') or
+                agent_details.get('prompt', '') or
+                agent_config.get('system_prompt', '') or
+                agent_config.get('systemPrompt', '') or
+                agent_config.get('prompt', '') or
+                conversation_config.get('system_prompt', '') or
+                conversation_config.get('systemPrompt', '') or
+                (agent_details.get('workflow', {}) or {}).get('system_prompt', '') or
+                (agent_details.get('workflow', {}) or {}).get('systemPrompt', '')
+            )
+            
+            override_settings = agent_details.get('override_settings', {}) or agent_details.get('overrideSettings', {})
+            
+            response_data = {
+                'success': True,
+                'agent_id': agent_id,
+                'system_prompt_length': len(system_prompt),
+                'system_prompt_preview': system_prompt[:300] + '...' if len(system_prompt) > 300 else system_prompt,
+                'has_template_variables': '{{first_question}}' in system_prompt or '{{question_list}}' in system_prompt,
+                'override_settings': override_settings
+            }
+            
+            # Add debug info if system prompt is empty
+            if system_prompt == '':
+                response_data['agent_data_keys'] = list(agent_details.keys())
+                # Show structure of nested objects
+                if 'conversation_config' in agent_details:
+                    conv_config = agent_details.get('conversation_config', {})
+                    if isinstance(conv_config, dict):
+                        response_data['conversation_config_keys'] = list(conv_config.keys())
+                        response_data['conversation_config_preview'] = str(conv_config)[:500]
+                        
+                        # Check agent sub-object
+                        if 'agent' in conv_config and isinstance(conv_config.get('agent'), dict):
+                            agent_config = conv_config.get('agent', {})
+                            response_data['agent_config_keys'] = list(agent_config.keys())
+                            response_data['agent_config_preview'] = str(agent_config)[:500]
+                
+                if 'workflow' in agent_details:
+                    workflow = agent_details.get('workflow', {})
+                    if isinstance(workflow, dict):
+                        response_data['workflow_keys'] = list(workflow.keys())
+                        response_data['workflow_preview'] = str(workflow)[:500]
+            
+            return jsonify(response_data)
+        else:
+            # Even if get_agent_details failed, try to get basic info
+            return jsonify({
+                'success': False,
+                'error': 'Could not retrieve agent details',
+                'agent_id': agent_id,
+                'suggestion': 'Check server logs for detailed error message. The API call to ElevenLabs may have failed.'
+            }), 500
+    except Exception as e:
+        logger.error(f"Error verifying agent: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 if __name__ == '__main__':

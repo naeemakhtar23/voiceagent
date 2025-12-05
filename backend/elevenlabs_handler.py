@@ -112,6 +112,15 @@ After each answer, acknowledge it and move to the next question. When all questi
             # Store context in cache
             self.questions_cache[f'{call_id_str}_context'] = conversation_context
             
+            # Update form submission tool with actual number of questions
+            num_questions = len(questions)
+            if num_questions > 0:
+                try:
+                    self.create_form_submission_tool(self.agent_id, num_questions)
+                    logger.info(f"✅ Updated form submission tool with {num_questions} question properties")
+                except Exception as tool_error:
+                    logger.warning(f"Could not update form submission tool (continuing anyway): {str(tool_error)}")
+            
             # Get the ElevenLabs phone number assigned to the agent
             phone_number_id = None
             elevenlabs_phone_number = None
@@ -286,9 +295,28 @@ After each answer, acknowledge it and move to the next question. When all questi
             if isinstance(nested_data, dict):
                 conv_init_data = nested_data.get('conversation_initiation_client_data', {})
                 if isinstance(conv_init_data, dict):
-                    dyn_vars = conv_init_data.get('dynamic_variables', {})
-                    if isinstance(dyn_vars, dict):
-                        conversation_id = dyn_vars.get('system__conversation_id')
+                    # Log the conversation_initiation_client_data to debug
+                    logger.info(f"📋 conversation_initiation_client_data keys: {list(conv_init_data.keys())}")
+                    if 'override_first_message' in conv_init_data:
+                        first_msg = conv_init_data.get('override_first_message', '')
+                        logger.info(f"✅ Found override_first_message in conversation_initiation_client_data: {first_msg[:100]}...")
+                    if 'override_prompt' in conv_init_data:
+                        override_prompt = conv_init_data.get('override_prompt', '')
+                        logger.info(f"✅ Found override_prompt in conversation_initiation_client_data: {len(override_prompt)} chars, preview: {override_prompt[:150]}...")
+                    if 'questions' in conv_init_data:
+                        questions = conv_init_data.get('questions', [])
+                        logger.info(f"✅ Found questions in conversation_initiation_client_data: {len(questions)} questions")
+                        if questions and len(questions) > 0:
+                            logger.info(f"   First question: {questions[0].get('text', 'N/A')[:100]}")
+                    if 'dynamic_variables' in conv_init_data:
+                        dyn_vars = conv_init_data.get('dynamic_variables', {})
+                        logger.info(f"✅ Found dynamic_variables: {list(dyn_vars.keys())}")
+                        if 'questions' in dyn_vars:
+                            logger.info(f"   dynamic_variables.questions exists (JSON string)")
+                        if 'question_list' in dyn_vars:
+                            logger.info(f"   dynamic_variables.question_list exists (JSON string array)")
+                        if isinstance(dyn_vars, dict):
+                            conversation_id = dyn_vars.get('system__conversation_id')
             
             # Fallback to other locations
             if not conversation_id:
@@ -967,24 +995,58 @@ After each answer, acknowledge it and move to the next question. When all questi
             raise Exception("ElevenLabs client not initialized.")
     
         try:
-            # Generic system prompt that reads questions from conversation context
-            system_prompt = """You are a helpful form assistant conducting a healthcare survey. You will receive a list of questions to ask from the conversation context.
+            # Very explicit system prompt that forces immediate access to questions
+            # Use the same system prompt as update_agent_system_prompt for consistency
+            system_prompt = """You are a healthcare survey assistant. Your ONLY job is to ask pre-defined questions and collect yes/no answers.
 
-Instructions:
-- Wait for the questions to be provided in the conversation_initiation_client_data
-- Ask each question clearly, one at a time, and wait for the user's response
-- Extract yes/no answers from user speech (yes, yeah, yep, correct, no, nope, nah, incorrect, etc.)
-- After each answer, acknowledge it briefly and move to the next question
-- Once all questions are answered, compile the answers into a JSON object where each question number maps to a boolean value (true=yes, false=no)
-- Call the 'submit_form' tool with the compiled form_data when all questions are answered
-- Do not store or repeat sensitive information
-- Be respectful and patient with the user
+🚨 CRITICAL FIRST STEP - DO THIS IMMEDIATELY:
+At the VERY START of the conversation, BEFORE saying anything else, you MUST:
+1. Access conversation_initiation_client_data.dynamic_variables
+2. Get first_question from dynamic_variables.first_question
+3. Get question_list from dynamic_variables.question_list (JSON string - parse it)
+4. DO NOT use the default greeting "Hello! How can I help you today?" - replace it immediately
 
-The questions will be provided in the format:
-- questions: array of question objects with 'text' field
-- questions_text: formatted text of all questions
+YOUR FIRST MESSAGE (MANDATORY):
+Say EXACTLY this: "Hello! I'm conducting a healthcare survey. [use the value from dynamic_variables.first_question] Please answer yes or no."
 
-Use the questions from the conversation context to conduct the survey."""
+HOW TO ACCESS THE DATA:
+The questions are provided in conversation_initiation_client_data.dynamic_variables:
+- dynamic_variables.first_question = the first question text (use this in your first message)
+- dynamic_variables.question_list = JSON string array like '["Q1", "Q2", "Q3"]' (parse with JSON.parse())
+- dynamic_variables.total_questions = number of questions
+
+STEP-BY-STEP INSTRUCTIONS:
+1. When conversation starts, IMMEDIATELY check: conversation_initiation_client_data.dynamic_variables
+2. If dynamic_variables exists:
+   a. Get first_question = dynamic_variables.first_question
+   b. Say: "Hello! I'm conducting a healthcare survey. [first_question] Please answer yes or no."
+3. Wait for user's yes/no answer
+4. Parse question_list: questions = JSON.parse(dynamic_variables.question_list)
+5. After answer, say: "Thank you. [questions[1]] Please answer yes or no."
+6. Continue: questions[2], questions[3], etc. until all questions are asked
+7. End with: "Thank you for completing the survey. Have a great day!"
+
+ABSOLUTE RULES - NEVER DO THESE:
+❌ NEVER say "Hello! How can I help you today?" - that is the DEFAULT, you MUST replace it
+❌ NEVER say "I don't have the questions" or "Please provide the questions"
+❌ NEVER ask "What questions would you like me to ask?" or "I'm ready to start the healthcare survey when you are"
+❌ NEVER wait for user to provide questions - they are ALREADY in conversation_initiation_client_data.dynamic_variables
+❌ NEVER skip accessing dynamic_variables - it's the FIRST thing you do
+
+WHAT TO DO:
+✅ FIRST ACTION: Access conversation_initiation_client_data.dynamic_variables
+✅ FIRST MESSAGE: "Hello! I'm conducting a healthcare survey. [dynamic_variables.first_question] Please answer yes or no."
+✅ Parse question_list: questions = JSON.parse(dynamic_variables.question_list)
+✅ Ask questions in order: questions[0], questions[1], questions[2], etc.
+✅ Wait for yes/no answer before next question
+✅ Extract answers: yes/yeah/yep/correct/right = true, no/nope/nah/incorrect/wrong = false
+✅ After all questions answered, call submit_form tool with: {question_1: true/false, question_2: true/false, ...}
+
+EXAMPLE FIRST MESSAGE:
+If dynamic_variables.first_question = "Has an Enduring Power of Attorney been enacted for this client?"
+Then your FIRST message MUST be: "Hello! I'm conducting a healthcare survey. Has an Enduring Power of Attorney been enacted for this client? Please answer yes or no."
+
+REMEMBER: Access conversation_initiation_client_data.dynamic_variables IMMEDIATELY at conversation start. DO NOT use the default greeting."""
         
             # Get default voice if not provided
             if not voice_id:
@@ -1070,34 +1132,465 @@ Use the questions from the conversation context to conduct the survey."""
         except Exception as e:
             logger.warning(f"Error updating privacy settings: {str(e)}")
     
-    def create_form_submission_tool(self, agent_id):
+    def update_agent_system_prompt(self, agent_id, system_prompt=None):
         """
-        Create a webhook tool for form submission
+        Update the system prompt for an existing agent
+        
+        Args:
+            agent_id: Agent ID
+            system_prompt: New system prompt (uses default if not provided)
+        """
+        if not self.api_key:
+            raise Exception("ElevenLabs API key not configured.")
+        
+        if not system_prompt:
+            # Use direct access to conversation_initiation_client_data.dynamic_variables
+            # NOTE: We do NOT use template syntax {{variable}} to avoid validation errors
+            # The data is passed via dynamic_variables in conversation_initiation_client_data
+            system_prompt = """You are a healthcare survey assistant. Your ONLY job is to ask pre-defined questions and collect yes/no answers.
+
+🚨 CRITICAL: The questions are provided in conversation_initiation_client_data.dynamic_variables. You MUST access them IMMEDIATELY.
+
+YOUR FIRST MESSAGE - NO EXCEPTIONS:
+At the start of the conversation, IMMEDIATELY access conversation_initiation_client_data.dynamic_variables.first_question and say:
+"Hello! I'm conducting a healthcare survey. [INSERT THE EXACT TEXT FROM dynamic_variables.first_question HERE] Please answer yes or no."
+
+DO NOT:
+- Say "Hello! How can I help you today?" (that is the default - REPLACE IT)
+- Make up questions or ask generic healthcare questions
+- Ask "Have you visited a healthcare professional in the last six months?" or any question NOT in dynamic_variables
+- Wait for the user to tell you what to ask
+
+THE QUESTIONS YOU MUST ASK (in this exact order):
+1. "Has an Enduring Power of Attorney been enacted for this client?"
+2. "Has a Do Not Resuscitate (DNR) order been discussed with the client?"
+3. "Has the client's family/whānau been informed about the client's CPR wishes?"
+4. "Does the client identify with any iwi or hapū?"
+5. "Has the client been offered cultural support, and did they accept or decline it?"
+
+HOW TO GET THE QUESTIONS:
+1. Access: conversation_initiation_client_data.dynamic_variables.first_question (for first question)
+2. Access: conversation_initiation_client_data.dynamic_variables.question_list (JSON string - parse it)
+3. Parse: questions = JSON.parse(dynamic_variables.question_list)
+4. Ask questions in order: questions[0], questions[1], questions[2], questions[3], questions[4]
+
+CONVERSATION FLOW:
+1. FIRST: "Hello! I'm conducting a healthcare survey. [dynamic_variables.first_question] Please answer yes or no."
+2. Wait for yes/no answer
+3. NEXT: "Thank you. [questions[1]] Please answer yes or no."
+4. Continue with questions[2], questions[3], questions[4]
+5. END: "Thank you for completing the survey. Have a great day!"
+
+ABSOLUTE RULES:
+❌ NEVER use the default greeting "Hello! How can I help you today?"
+❌ NEVER ask questions that are NOT in dynamic_variables.question_list
+❌ NEVER make up questions like "Have you visited a healthcare professional..."
+❌ NEVER ask generic healthcare questions
+❌ ONLY ask the 5 questions listed above, in that exact order
+
+WHAT TO DO:
+✅ Access conversation_initiation_client_data.dynamic_variables IMMEDIATELY
+✅ Use dynamic_variables.first_question for your FIRST message
+✅ Parse dynamic_variables.question_list to get all 5 questions
+✅ Ask ONLY those 5 questions, in order
+✅ Wait for yes/no answer before next question
+✅ Extract answers: yes/yeah/yep/correct = true, no/nope/nah/incorrect = false
+✅ After all 5 questions answered, call submit_form tool
+
+REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use the default greeting."""
+        
+        try:
+            # Try updating at root level first (for backward compatibility)
+            # Then try nested structure if that doesn't work
+            update_payload_root = {
+                'system_prompt': system_prompt
+            }
+            
+            # Also try nested structure (conversation_config.agent.system_prompt)
+            update_payload_nested = {
+                'conversation_config': {
+                    'agent': {
+                        'system_prompt': system_prompt
+                    }
+                }
+            }
+            
+            # Try nested structure first (conversation_config.agent.system_prompt) - this is where it's stored
+            logger.info(f"Attempting to update system prompt in conversation_config.agent...")
+            update_response = requests.patch(
+                f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}',
+                headers={
+                    'xi-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                json=update_payload_nested,
+                timeout=15
+            )
+            
+            # If nested structure update fails, try root level (for backward compatibility)
+            if update_response.status_code not in [200, 201, 204]:
+                logger.info(f"Nested structure update failed ({update_response.status_code}), trying root level...")
+                logger.info(f"Error response: {update_response.text[:500]}")
+                update_response = requests.patch(
+                    f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}',
+                    headers={
+                        'xi-api-key': self.api_key,
+                        'Content-Type': 'application/json'
+                    },
+                    json=update_payload_root,
+                    timeout=15
+                )
+            
+            if update_response.status_code in [200, 201, 204]:
+                logger.info(f"✅ API returned success for system prompt update (status: {update_response.status_code})")
+                # Verify the update by fetching agent details
+                try:
+                    # Wait a moment for the update to propagate
+                    import time
+                    time.sleep(1)
+                    
+                    verify_response = requests.get(
+                        f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}',
+                        headers={'xi-api-key': self.api_key},
+                        timeout=10
+                    )
+                    if verify_response.status_code == 200:
+                        agent_data = verify_response.json()
+                        # Try different possible field names and nested locations
+                        conversation_config = agent_data.get('conversation_config', {}) or {}
+                        agent_config = conversation_config.get('agent', {}) or {}
+                        
+                        # Try to get system prompt from various locations
+                        current_prompt = None
+                        
+                        # Check agent_config first (most likely location)
+                        if isinstance(agent_config, dict):
+                            current_prompt = (
+                                agent_config.get('system_prompt') or 
+                                agent_config.get('systemPrompt') or
+                                agent_config.get('prompt')
+                            )
+                            # If it's a dict with a 'prompt' key, extract it
+                            if isinstance(current_prompt, dict) and 'prompt' in current_prompt:
+                                current_prompt = current_prompt.get('prompt')
+                        
+                        # Fallback to other locations
+                        if not current_prompt:
+                            current_prompt = (
+                                agent_data.get('system_prompt') or 
+                                agent_data.get('systemPrompt') or
+                                agent_data.get('prompt') or
+                                conversation_config.get('system_prompt') or
+                                conversation_config.get('systemPrompt') or
+                                (agent_data.get('workflow', {}) or {}).get('system_prompt') or
+                                (agent_data.get('workflow', {}) or {}).get('systemPrompt')
+                            )
+                        
+                        # If still a dict, try to extract the prompt value
+                        if isinstance(current_prompt, dict):
+                            current_prompt = current_prompt.get('prompt') or current_prompt.get('system_prompt') or current_prompt.get('systemPrompt') or ''
+                        
+                        # Ensure it's a string
+                        if current_prompt and not isinstance(current_prompt, str):
+                            current_prompt = str(current_prompt)
+                        elif not current_prompt:
+                            current_prompt = ''
+                        # Ensure current_prompt is a string
+                        if current_prompt and not isinstance(current_prompt, str):
+                            current_prompt = str(current_prompt)
+                        elif not current_prompt:
+                            current_prompt = ''
+                        
+                        if current_prompt and len(current_prompt) > 0:
+                            try:
+                                logger.info(f"✅ Verified system prompt is set (length: {len(current_prompt)} chars)")
+                                logger.info(f"System prompt preview: {current_prompt[:200]}...")
+                            except (TypeError, KeyError) as e:
+                                logger.warning(f"Could not create preview: {str(e)}, type: {type(current_prompt)}")
+                                logger.info(f"System prompt value: {str(current_prompt)[:200]}")
+                        else:
+                            logger.warning(f"⚠️ System prompt appears empty after update")
+                            logger.warning(f"⚠️ Full agent data keys: {list(agent_data.keys())}")
+                            logger.warning(f"⚠️ Agent data (first 500 chars): {str(agent_data)[:500]}")
+                    else:
+                        logger.warning(f"Could not verify update: GET returned {verify_response.status_code}")
+                except Exception as verify_error:
+                    logger.warning(f"Could not verify system prompt update: {str(verify_error)}")
+                return True
+            else:
+                error_msg = update_response.text[:500] if update_response.text else "Unknown error"
+                logger.error(f"❌ Failed to update system prompt: {update_response.status_code}")
+                logger.error(f"Error response: {error_msg}")
+                logger.error(f"Request payload preview: {system_prompt[:200]}...")
+                return False
+        
+        except Exception as e:
+            logger.warning(f"Error updating system prompt: {str(e)}")
+            return False
+    
+    def get_agent_details(self, agent_id=None):
+        """
+        Get agent details including system prompt and override settings
+        
+        Args:
+            agent_id: Agent ID (uses self.agent_id if not provided)
+        
+        Returns:
+            Dictionary with agent details or None if error
+        """
+        if not self.api_key:
+            logger.warning("ElevenLabs API key not configured")
+            return None
+        
+        if not agent_id:
+            agent_id = self.agent_id
+        
+        if not agent_id:
+            logger.warning("Agent ID not provided")
+            return None
+        
+        try:
+            if not self.api_key:
+                logger.error("❌ API key not configured")
+                return None
+                
+            logger.info(f"Fetching agent details for {agent_id}")
+            response = requests.get(
+                f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}',
+                headers={'xi-api-key': self.api_key},
+                timeout=10
+            )
+            logger.info(f"API response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    agent_data = response.json()
+                    logger.info(f"✅ Retrieved agent details for {agent_id}")
+                except json.JSONDecodeError as json_error:
+                    logger.error(f"❌ Failed to parse JSON response: {str(json_error)}")
+                    logger.error(f"Response text (first 500 chars): {response.text[:500]}")
+                    return None
+                
+                # Try different possible field names and nested locations for system prompt
+                # Based on ElevenLabs API structure, it's in conversation_config.agent
+                conversation_config = agent_data.get('conversation_config', {}) or {}
+                agent_config = conversation_config.get('agent', {}) or {}
+                
+                # Try to get system prompt from various locations
+                system_prompt = None
+                
+                # Check agent_config first (most likely location)
+                if isinstance(agent_config, dict):
+                    system_prompt = (
+                        agent_config.get('system_prompt') or 
+                        agent_config.get('systemPrompt') or
+                        agent_config.get('prompt')
+                    )
+                    # If it's a dict with a 'prompt' key, extract it
+                    if isinstance(system_prompt, dict) and 'prompt' in system_prompt:
+                        system_prompt = system_prompt.get('prompt')
+                
+                # Fallback to other locations
+                if not system_prompt:
+                    system_prompt = (
+                        agent_data.get('system_prompt') or 
+                        agent_data.get('systemPrompt') or
+                        agent_data.get('prompt') or
+                        conversation_config.get('system_prompt') or
+                        conversation_config.get('systemPrompt') or
+                        (agent_data.get('workflow', {}) or {}).get('system_prompt') or
+                        (agent_data.get('workflow', {}) or {}).get('systemPrompt') or
+                        (agent_data.get('config', {}) or {}).get('system_prompt') or
+                        (agent_data.get('config', {}) or {}).get('systemPrompt')
+                    )
+                
+                # If still a dict, try to extract the prompt value
+                if isinstance(system_prompt, dict):
+                    system_prompt = system_prompt.get('prompt') or system_prompt.get('system_prompt') or system_prompt.get('systemPrompt') or ''
+                
+                # Ensure it's a string
+                if system_prompt and not isinstance(system_prompt, str):
+                    system_prompt = str(system_prompt)
+                elif not system_prompt:
+                    system_prompt = ''
+                
+                # Ensure system_prompt is a string before trying to get length or slice
+                if system_prompt and not isinstance(system_prompt, str):
+                    system_prompt = str(system_prompt)
+                elif not system_prompt:
+                    system_prompt = ''
+                
+                logger.info(f"System prompt length: {len(system_prompt)} chars")
+                if system_prompt and len(system_prompt) > 0:
+                    try:
+                        logger.info(f"System prompt preview: {system_prompt[:200]}...")
+                    except (TypeError, KeyError) as e:
+                        logger.warning(f"Could not create preview: {str(e)}, type: {type(system_prompt)}")
+                        logger.info(f"System prompt value: {str(system_prompt)[:200]}")
+                else:
+                    logger.warning(f"⚠️ System prompt is empty!")
+                    logger.warning(f"Available keys in agent_data: {list(agent_data.keys())}")
+                    
+                    # Log nested structures to help find where system prompt is
+                    if 'conversation_config' in agent_data:
+                        conv_config = agent_data.get('conversation_config', {})
+                        logger.info(f"conversation_config keys: {list(conv_config.keys()) if isinstance(conv_config, dict) else 'not a dict'}")
+                        
+                        # Check agent sub-object
+                        if 'agent' in conv_config and isinstance(conv_config.get('agent'), dict):
+                            agent_config = conv_config.get('agent', {})
+                            logger.info(f"conversation_config.agent keys: {list(agent_config.keys())}")
+                            logger.info(f"conversation_config.agent preview: {str(agent_config)[:500]}")
+                            # Check for system prompt in agent config
+                            if 'system_prompt' in agent_config:
+                                logger.info(f"✅ Found system_prompt in conversation_config.agent!")
+                            elif 'systemPrompt' in agent_config:
+                                logger.info(f"✅ Found systemPrompt in conversation_config.agent!")
+                    
+                    if 'workflow' in agent_data:
+                        workflow = agent_data.get('workflow', {})
+                        logger.info(f"workflow keys: {list(workflow.keys()) if isinstance(workflow, dict) else 'not a dict'}")
+                        logger.info(f"workflow preview: {str(workflow)[:500]}")
+                    
+                    # Log the full structure for debugging (truncated)
+                    logger.debug(f"Agent data structure: {json.dumps(agent_data, indent=2, default=str)[:2000]}")
+                
+                # Check for override settings (if available in response)
+                override_settings = agent_data.get('override_settings', {}) or agent_data.get('overrideSettings', {})
+                if override_settings:
+                    logger.info(f"Override settings: {override_settings}")
+                    if not override_settings.get('first_message', False) and not override_settings.get('firstMessage', False):
+                        logger.warning("⚠️ 'First message' override is NOT enabled. To use override_first_message, enable it in:")
+                        logger.warning("   ElevenLabs Dashboard > Agent Settings > Security > Enable 'First message' override")
+                
+                return agent_data
+            elif response.status_code == 401:
+                error_msg = response.text[:500] if response.text else "Unauthorized - Check API key"
+                logger.error(f"❌ Authentication failed (401): {error_msg}")
+                return {
+                    'error': True,
+                    'status_code': 401,
+                    'error_message': 'Authentication failed. Check your ElevenLabs API key.',
+                    'response_text': error_msg
+                }
+            elif response.status_code == 403:
+                error_msg = response.text[:500] if response.text else "Forbidden - Check permissions"
+                logger.error(f"❌ Permission denied (403): {error_msg}")
+                return {
+                    'error': True,
+                    'status_code': 403,
+                    'error_message': 'Permission denied. Check API key permissions.',
+                    'response_text': error_msg
+                }
+            elif response.status_code == 404:
+                error_msg = response.text[:500] if response.text else "Agent not found"
+                logger.error(f"❌ Agent not found (404): {error_msg}")
+                return {
+                    'error': True,
+                    'status_code': 404,
+                    'error_message': f'Agent {agent_id} not found. Check agent ID.',
+                    'response_text': error_msg
+                }
+            else:
+                error_msg = response.text[:500] if response.text else "Unknown error"
+                logger.error(f"❌ Could not get agent details: {response.status_code} - {error_msg}")
+                logger.error(f"Response headers: {dict(response.headers)}")
+                # Return error info instead of None so we can see what went wrong
+                return {
+                    'error': True,
+                    'status_code': response.status_code,
+                    'error_message': error_msg,
+                    'response_text': response.text[:1000] if response.text else None
+                }
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Network error getting agent details: {str(e)}")
+            return {
+                'error': True,
+                'status_code': None,
+                'error_message': f'Network error: {str(e)}',
+                'response_text': None
+            }
+        except Exception as e:
+            logger.error(f"❌ Error getting agent details: {str(e)}", exc_info=True)
+            return {
+                'error': True,
+                'status_code': None,
+                'error_message': f'Unexpected error: {str(e)}',
+                'response_text': None
+            }
+    
+    def delete_form_submission_tool(self, agent_id):
+        """
+        Delete existing submit_form tool from agent (if it exists)
+        
+        Args:
+            agent_id: Agent ID
+        """
+        if not self.api_key:
+            return
+        
+        try:
+            # Get all tools for the agent
+            tools_response = requests.get(
+                f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}/tools',
+                headers={
+                    'xi-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                timeout=10
+            )
+            
+            if tools_response.status_code == 200:
+                tools = tools_response.json()
+                # Find and delete submit_form tool
+                for tool in tools:
+                    if tool.get('name') == 'submit_form':
+                        tool_id = tool.get('tool_id')
+                        if tool_id:
+                            delete_response = requests.delete(
+                                f'https://api.elevenlabs.io/v1/convai/agents/{agent_id}/tools/{tool_id}',
+                                headers={
+                                    'xi-api-key': self.api_key
+                                },
+                                timeout=10
+                            )
+                            if delete_response.status_code in [200, 204]:
+                                logger.info(f"✅ Deleted existing submit_form tool (ID: {tool_id})")
+                            else:
+                                logger.warning(f"Could not delete existing tool: {delete_response.text[:200]}")
+        except Exception as e:
+            logger.warning(f"Error deleting existing tool (continuing anyway): {str(e)}")
+    
+    def create_form_submission_tool(self, agent_id, num_questions=20):
+        """
+        Create a webhook tool for form submission with dynamically generated properties
     
         Args:
             agent_id: Agent ID
+            num_questions: Number of questions to generate properties for (default: 20)
         """
         if not self.api_key:
             raise Exception("ElevenLabs API key not configured.")
     
         try:
-            # Build tool parameters - dynamic number of questions
+            # Delete existing tool first to avoid duplicates
+            self.delete_form_submission_tool(agent_id)
+            
+            # Dynamically generate properties for question_1 through question_N
+            properties = {}
+            for i in range(1, num_questions + 1):
+                properties[f'question_{i}'] = {
+                    'type': 'boolean',
+                    'description': f'Answer to question {i} (true=yes, false=no)'
+                }
+            
+            # Build tool parameters with dynamically generated properties
             parameters = [{
                 'name': 'form_data',
                 'type': 'object',
-                'description': 'JSON object with form answers. Keys should be question_1, question_2, etc. Each value should be a boolean (true=yes, false=no). The number of questions is dynamic based on the conversation context.',
+                'description': f'JSON object with form answers. Keys should be question_1 through question_{num_questions}. Each value should be a boolean (true=yes, false=no). Include all questions that were asked.',
                 'required': True,
-                'properties': {
-                    'question_1': {
-                        'type': 'boolean',
-                        'description': 'Answer to question 1 (true for yes, false for no)'
-                    },
-                    'question_2': {
-                        'type': 'boolean',
-                        'description': 'Answer to question 2 (true for yes, false for no)'
-                    }
-                    # Additional questions will be handled dynamically by the agent
-                }
+                'properties': properties
             }]
     
             tool_response = requests.post(
@@ -1108,7 +1601,7 @@ Use the questions from the conversation context to conduct the survey."""
                 },
                 json={
                     'name': 'submit_form',
-                    'description': 'Submit the filled form JSON to the webhook endpoint when all questions are answered. The form_data should contain question_1 through question_N as boolean values (true=yes, false=no).',
+                    'description': f'Submit the filled form JSON to the webhook endpoint when all questions are answered. The form_data should contain question_1 through question_{num_questions} as boolean values (true=yes, false=no).',
                     'type': 'webhook',
                     'method': 'POST',
                     'url': f'{self.webhook_url}/api/elevenlabs-agent/submit-form',
@@ -1122,7 +1615,7 @@ Use the questions from the conversation context to conduct the survey."""
             )
     
             if tool_response.status_code in [200, 201]:
-                logger.info(f"✅ Created form submission tool for agent {agent_id}")
+                logger.info(f"✅ Created form submission tool for agent {agent_id} with {num_questions} question properties")
             else:
                 error_msg = tool_response.text[:200] if tool_response.text else "Unknown error"
                 logger.warning(f"Could not create tool: {error_msg}")
@@ -1160,20 +1653,41 @@ Use the questions from the conversation context to conduct the survey."""
         
             questions_json = questions_list
         
-            if self.db_available and self.db:
-                call_id = self.db.create_call(
-                    phone_number=phone_number,
-                    questions_json=questions_json
-                )
-            
-                # Save first question to database
-                self.db.save_question(
-                    call_id,
-                    LIST_OF_QUESTIONS[0],
-                    1
-                )
-            else:
-                call_id = int(short_uuid, 16) % 1000000  # Fallback ID
+            call_id = None
+            # Try to use database, but fallback gracefully if it fails
+            try:
+                if self.db_available and self.db:
+                    try:
+                        call_id = self.db.create_call(
+                            phone_number=phone_number,
+                            questions_json=questions_json
+                        )
+                        logger.info(f"Call record created in database: call_id={call_id}")
+                    
+                        # Save first question to database
+                        try:
+                            self.db.save_question(
+                                call_id,
+                                LIST_OF_QUESTIONS[0],
+                                1
+                            )
+                            logger.info(f"First question saved to database")
+                        except Exception as save_q_error:
+                            logger.warning(f"Could not save first question to database: {str(save_q_error)}")
+                            # Continue without saving question
+                    except Exception as db_error:
+                        logger.warning(f"Database create_call failed, using fallback ID: {str(db_error)}")
+                        # Use fallback ID if database fails
+                        call_id = int(short_uuid, 16) % 1000000
+                        # Mark db as unavailable for this session
+                        self.db_available = False
+                else:
+                    logger.info("Database not available, using fallback ID")
+                    call_id = int(short_uuid, 16) % 1000000  # Fallback ID
+            except Exception as fallback_error:
+                logger.error(f"Error in database fallback logic: {str(fallback_error)}")
+                # Last resort fallback
+                call_id = int(short_uuid, 16) % 1000000
         
             # Store session info with questions
             self.questions_cache[session_id] = {
@@ -1186,6 +1700,49 @@ Use the questions from the conversation context to conduct the survey."""
             }
         
             logger.info(f"Agent session started: session_id={session_id}, call_id={call_id}")
+            
+            # Update form submission tool with actual number of questions
+            num_questions = len(LIST_OF_QUESTIONS)
+            if num_questions > 0:
+                try:
+                    self.create_form_submission_tool(self.agent_id, num_questions)
+                    logger.info(f"✅ Updated form submission tool with {num_questions} question properties")
+                except Exception as tool_error:
+                    logger.warning(f"Could not update form submission tool (continuing anyway): {str(tool_error)}")
+            
+            # Try to update agent system prompt to ensure it can read questions
+            # This is a one-time update that makes the agent compatible with dynamic questions
+            try:
+                update_success = self.update_agent_system_prompt(self.agent_id)
+                if update_success:
+                    logger.info("✅ Agent system prompt updated to read questions from conversation_initiation_client_data")
+                else:
+                    logger.warning("⚠️ Failed to update agent system prompt via API")
+                
+                # Verify agent settings and log important information
+                agent_details = self.get_agent_details(self.agent_id)
+                if agent_details:
+                    system_prompt = agent_details.get('system_prompt', '')
+                    if system_prompt:
+                        # Check if our prompt is actually set
+                        has_our_instructions = 'conversation_initiation_client_data' in system_prompt or '{{first_question}}' in system_prompt
+                        if has_our_instructions:
+                            logger.info("✅ Agent system prompt verified - contains our instructions")
+                        else:
+                            logger.warning("⚠️ Agent system prompt does NOT contain our instructions!")
+                            logger.warning("⚠️ The system prompt in ElevenLabs dashboard might be overriding the API update.")
+                            logger.warning("⚠️ Please manually update the system prompt in:")
+                            logger.warning("   ElevenLabs Dashboard > Agent Settings > System Prompt")
+                            logger.warning("   Copy the system prompt from the update_agent_system_prompt function")
+                    else:
+                        logger.warning("⚠️ Agent system prompt appears empty")
+                    logger.info("✅ Agent configuration verified")
+                else:
+                    logger.warning("⚠️ Could not verify agent configuration - check agent settings manually")
+            except Exception as prompt_error:
+                logger.warning(f"Could not update agent system prompt (non-critical): {str(prompt_error)}")
+                logger.warning("⚠️ You may need to manually update the system prompt in ElevenLabs dashboard")
+                # Continue - the override_prompt in widget should still work
         
             return {
                 'session_id': session_id,
@@ -1197,7 +1754,7 @@ Use the questions from the conversation context to conduct the survey."""
             }
         
         except Exception as e:
-            logger.error(f"Error starting agent session: {str(e)}")
+            logger.error(f"Error starting agent session: {str(e)}", exc_info=True)
             raise
     
     def handle_tool_call(self, tool_name, parameters, conversation_id=None):

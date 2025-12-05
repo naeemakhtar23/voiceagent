@@ -6,6 +6,7 @@
     <title>ElevenLabs Voice Agent - Healthcare Form</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async type="text/javascript"></script>
 </head>
 <body>
     <div class="app-container">
@@ -76,9 +77,12 @@
                     </div>
                     <div class="card-body">
                         <div id="sessionInfo" class="session-info" style="margin-bottom: 20px;"></div>
-                        <div id="conversationStatus" class="conversation-status" style="padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                        <div id="conversationStatus" class="conversation-status" style="padding: 20px; background: #f8f9fa; border-radius: 8px; margin-bottom: 20px;">
                             <p style="margin: 0;">Conversation in progress... The agent will ask questions and collect answers.</p>
-                            <p style="margin: 10px 0 0 0; color: #666; font-size: 0.9em;">Note: Connect to the agent via ElevenLabs widget, phone, or WebSocket to interact.</p>
+                            <p style="margin: 10px 0 0 0; color: #666; font-size: 0.9em;">Use the widget below to interact with the agent.</p>
+                        </div>
+                        <div id="widgetContainer" style="min-height: 400px; margin-top: 20px;">
+                            <!-- ElevenLabs widget will be inserted here -->
                         </div>
                     </div>
                 </div>
