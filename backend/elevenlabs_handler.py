@@ -1589,9 +1589,16 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
             # Dynamically generate properties for question_1 through question_N
             properties = {}
             for i in range(1, num_questions + 1):
+                # ElevenLabs UI validators expect these extra keys to exist even for dynamic properties
                 properties[f'question_{i}'] = {
                     'type': 'boolean',
-                    'description': f'Answer to question {i} (true=yes, false=no)'
+                    'description': f'Answer to question {i} (true=yes, false=no)',
+                    'value_type': 'llm_prompt',
+                    'dynamic_variable': '',
+                    'constant_value': '',
+                    'enum': None,
+                    'is_system_provided': False,
+                    'required': False
                 }
             
             # Build tool parameters with dynamically generated properties
@@ -1600,7 +1607,13 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
                 'type': 'object',
                 'description': f'JSON object with form answers. Keys MUST be question_1 through question_{num_questions}. Each value should be a boolean (true=yes, false=no). You MUST include ALL {num_questions} questions that were asked. Missing questions will cause the submission to fail.',
                 'required': True,
-                'properties': properties
+                'value_type': 'llm_prompt',
+                'properties': properties,
+                # Allow future questions if the ElevenLabs API preserves this field; safe to include
+                'additionalProperties': {
+                    'type': 'boolean',
+                    'description': 'true = yes, false = no'
+                }
             }]
     
             tool_response = requests.post(
