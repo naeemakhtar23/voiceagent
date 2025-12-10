@@ -1586,33 +1586,39 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
             # Delete existing tool first to avoid duplicates
             self.delete_form_submission_tool(agent_id)
             
-            # Dynamically generate properties for question_1 through question_N
-            properties = {}
-            for i in range(1, num_questions + 1):
-                # ElevenLabs UI validators expect these extra keys to exist even for dynamic properties
-                properties[f'question_{i}'] = {
-                    'type': 'boolean',
-                    'description': f'Answer to question {i} (true=yes, false=no)',
-                    'value_type': 'llm_prompt',
-                    'dynamic_variable': '',
-                    'constant_value': '',
-                    'enum': None,
-                    'is_system_provided': False,
-                    'required': False
-                }
-            
-            # Build tool parameters with dynamically generated properties
+            # Build tool parameters using a single dynamic array of question/answer objects
+            # This avoids having to define a separate property for every question in the ElevenLabs UI
             parameters = [{
-                'name': 'form_data',
-                'type': 'object',
-                'description': f'JSON object with form answers. Keys MUST be question_1 through question_{num_questions}. Each value should be a boolean (true=yes, false=no). You MUST include ALL {num_questions} questions that were asked. Missing questions will cause the submission to fail.',
+                'name': 'answers',
+                'type': 'array',
+                'description': 'Array of question/answer objects for the completed form. Each item should contain the question text and the captured answer.',
                 'required': True,
                 'value_type': 'llm_prompt',
-                'properties': properties,
-                # Allow future questions if the ElevenLabs API preserves this field; safe to include
-                'additionalProperties': {
-                    'type': 'boolean',
-                    'description': 'true = yes, false = no'
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'question_number': {
+                            'type': 'integer',
+                            'description': '1-based index of the question in the call/session.'
+                        },
+                        'question_id': {
+                            'type': 'string',
+                            'description': 'Optional identifier for the question (if available).'
+                        },
+                        'question_text': {
+                            'type': 'string',
+                            'description': 'Exact text of the question that was asked.'
+                        },
+                        'answer_bool': {
+                            'type': 'boolean',
+                            'description': 'true = yes, false = no'
+                        },
+                        'answer_text': {
+                            'type': 'string',
+                            'description': 'Optional free-form text version of the answer (e.g. yes/no or a longer explanation).'
+                        }
+                    },
+                    'required': ['question_text']
                 }
             }]
     
@@ -1624,7 +1630,7 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
                 },
                 json={
                     'name': 'submit_form',
-                    'description': f'Submit the filled form JSON to the webhook endpoint when ALL questions are answered. The form_data MUST contain ALL questions from question_1 through question_{num_questions} as boolean values (true=yes, false=no). You MUST include every question that was asked. Example: {{"form_data": {{"question_1": true, "question_2": false, "question_3": true, "question_4": false, "question_5": true}}}}',
+                    'description': 'Submit the filled form JSON to the webhook endpoint when ALL questions are answered. Send a single parameter named "answers" which is an array of objects, one per question, each containing at least the question_text and the chosen answer.',
                     'type': 'webhook',
                     'method': 'POST',
                     'url': f'{self.webhook_url}/api/elevenlabs-agent/submit-form',
@@ -1793,27 +1799,10 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
             Response dictionary
         """
         if tool_name == 'submit_form':
-            form_data = parameters.get('form_data', {})
-            
-            # Validate that all questions are present
-            expected_questions = len(LIST_OF_QUESTIONS)
-            missing_questions = []
-            for i in range(1, expected_questions + 1):
-                question_key = f'question_{i}'
-                if question_key not in form_data:
-                    missing_questions.append(question_key)
-            
-            if missing_questions:
-                error_msg = f'Missing questions in form_data: {", ".join(missing_questions)}. You must include ALL {expected_questions} questions (question_1 through question_{expected_questions}) in the form_data.'
-                logger.warning(f"❌ Form submission incomplete: {error_msg}")
-                logger.warning(f"Received form_data: {form_data}")
-                return {
-                    'status': 'error',
-                    'message': error_msg,
-                    'received_questions': list(form_data.keys()),
-                    'expected_questions': [f'question_{i}' for i in range(1, expected_questions + 1)],
-                    'missing_questions': missing_questions
-                }
+            # New schema: preferred shape is a single array parameter "answers" containing
+            # objects with question/answer information.
+            answers_array = parameters.get('answers')
+            form_data = parameters.get('form_data', {})  # Backward compatibility
         
             # Find session by conversation_id
             session_id = None
@@ -1824,7 +1813,7 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
                         session_id = key.replace('_conversation_id', '')
                         break
         
-            # If not found by conversation_id, try to find by form_data structure
+            # If not found by conversation_id, try to find by cached sessions
             if not session_id:
                 for key, session in self.questions_cache.items():
                     if isinstance(session, dict) and session.get('call_id'):
@@ -1834,36 +1823,69 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
             if session_id and session_id in self.questions_cache:
                 session = self.questions_cache[session_id]
                 call_id = session.get('call_id')
-            
-                # Map form_data to questions
-                # form_data has keys like "question_1", "question_2", etc. with boolean values
-                if self.db_available and self.db and call_id:
+
+                # Decide which payload format we received and normalise into a list
+                # of (question_text, answer_bool) tuples.
+                normalized_answers = []
+
+                if isinstance(answers_array, list) and answers_array:
+                    # Preferred new dynamic array format
+                    for idx, item in enumerate(answers_array, start=1):
+                        if not isinstance(item, dict):
+                            continue
+                        q_text = item.get('question_text') or ''
+                        if not q_text:
+                            continue
+
+                        # Determine boolean answer from either explicit boolean field
+                        # or from a text field that looks like yes/no.
+                        answer_bool = item.get('answer_bool')
+                        if isinstance(answer_bool, bool):
+                            pass
+                        else:
+                            a_text = (item.get('answer_text') or '').strip().lower()
+                            if a_text in ['yes', 'y', 'true', '1']:
+                                answer_bool = True
+                            elif a_text in ['no', 'n', 'false', '0']:
+                                answer_bool = False
+                            else:
+                                # Default to False if unclear, but still record
+                                answer_bool = False
+
+                        normalized_answers.append((q_text, answer_bool))
+
+                elif isinstance(form_data, dict) and form_data:
+                    # Backward-compatible path: original form_data with question_1, question_2, ...
+                    # Keep behaviour as close as possible to the existing implementation.
+                    expected_questions = len(LIST_OF_QUESTIONS)
+                    for i in range(1, expected_questions + 1):
+                        field_name = f'question_{i}'
+                        answer_value = bool(form_data.get(field_name, False))
+                        question_text = LIST_OF_QUESTIONS[i-1] if i-1 < len(LIST_OF_QUESTIONS) else field_name
+                        normalized_answers.append((question_text, answer_value))
+
+                if self.db_available and self.db and call_id and normalized_answers:
                     try:
+                        existing_questions = self.db.get_call_questions(call_id)
+
+                        # Save / update each question and answer
                         question_num = 1
-                        for i, question_text in enumerate(LIST_OF_QUESTIONS):
-                            field_name = f"question_{i+1}"
-                            answer_value = form_data.get(field_name, False)
-                        
-                            # Convert boolean to yes/no string
-                            answer = 'yes' if answer_value else 'no'
-                        
+                        for question_text, answer_bool in normalized_answers:
                             # Check if question already exists
-                            existing_questions = self.db.get_call_questions(call_id)
                             existing_question = next(
                                 (q for q in existing_questions
                                  if q.get('question_number') == question_num),
                                 None
                             )
-                        
+
                             if not existing_question:
-                                # Insert new question
                                 self.db.save_question(
                                     call_id=call_id,
                                     question_text=question_text,
                                     question_number=question_num
                                 )
-                        
-                            # Update answer
+
+                            answer = 'yes' if answer_bool else 'no'
                             self.db.save_answer(
                                 call_id=call_id,
                                 question_num=question_num,
@@ -1871,18 +1893,18 @@ REMEMBER: You ONLY ask these 5 questions. Do NOT make up questions. Do NOT use t
                                 confidence=1.0,
                                 raw_response=answer
                             )
-                        
-                            logger.info(f"✅ Saved Q{question_num}: {answer}")
+
+                            logger.info(f" Saved Q{question_num}: {answer}")
                             question_num += 1
-                    
+
                         # Complete call
                         self.db.complete_call(call_id)
-                    
+
                         # Save results
                         results = self.db.get_call_results_json(call_id)
-                    
-                        logger.info(f"✅ Form submitted successfully: call_id={call_id}")
-                    
+
+                        logger.info(f" Form submitted successfully: call_id={call_id}")
+
                         return {
                             'status': 'success',
                             'message': 'Form submitted successfully',

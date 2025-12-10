@@ -500,8 +500,6 @@ def elevenlabs_webhook():
             webhook_data = request.form.to_dict()
         
         # Log raw webhook data for debugging
-        logger.info(f"ElevenLabs webhook received - Method: {request.method}, Content-Type: {request.content_type}")
-        logger.info(f"Raw webhook data: {json.dumps(webhook_data, indent=2, default=str)}")
         
         # Verify webhook signature if secret is configured
         if elevenlabs_handler.webhook_secret:
